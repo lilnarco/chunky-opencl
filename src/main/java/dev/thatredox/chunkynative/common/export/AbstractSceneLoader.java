@@ -82,6 +82,8 @@ public abstract class AbstractSceneLoader {
         ResourcePalette<PackedWaterModel> waterPalette = this.createWaterModelPalette();
         ResourcePalette<PackedTriangleModel> trigPalette = this.createTriangleModelPalette();
         materialPalette.put(PackedMaterial.air());
+        // Reserved index 1: opaque white material for the GPU cloud renderer.
+        materialPalette.put(PackedMaterial.cloud());
 
         SceneEntities entities = Reflection.getFieldValue(scene, "entities", SceneEntities.class);
         BVH worldBvh = Reflection.getFieldValue(entities, "bvh", BVH.class);

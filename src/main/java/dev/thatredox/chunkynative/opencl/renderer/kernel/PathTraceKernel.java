@@ -62,7 +62,6 @@ public class PathTraceKernel implements AutoCloseable {
         binder.setMem(bindings.getSceneLoader().getEmitterGridEmitters().get());
 
         binder.setMem(bindings.getSceneLoader().getSky().skyTexture.get());
-        binder.setMem(bindings.getSceneLoader().getSky().skyIntensity.get());
         binder.setMem(bindings.getSceneLoader().getSun().get());
 
         binder.setMem(bindings.getGpu().getRandomSeed().get());
@@ -70,10 +69,14 @@ public class PathTraceKernel implements AutoCloseable {
         binder.setMem(bindings.getGpu().getCanvasConfig().get());
         binder.setMem(bindings.getGpu().getRayDepth().get());
         binder.setMem(bindings.getGpu().getSceneSettings().get());
+        binder.setMem(bindings.getGpu().getAtmosphereSettings().get());
+        binder.setMem(bindings.getGpu().getCloudData().get());
         binder.setInt(bindings.getSceneConstants().getEmittersEnabled());
         binder.setFloat(bindings.getSceneConstants().getEmitterIntensity());
         binder.setInt(bindings.getSceneConstants().getEmitterSamplingStrategy());
         binder.setInt(bindings.getSceneConstants().getPreventNormalEmitterWithSampling());
+        binder.setMem(bindings.getGpu().getAlbedoBuffer().get());
+        binder.setMem(bindings.getGpu().getNormalBuffer().get());
         binder.setMem(bindings.getGpu().getBuffer().get());
     }
 

@@ -13,7 +13,7 @@ public class ContextManager {
 
     public final ClSceneLoader sceneLoader;
 
-    private static volatile ContextManager instance = new ContextManager(Device.getPreferredDevice());
+    private static volatile ContextManager instance;
 
     private ContextManager(Device device) {
         this.device = device;
@@ -23,8 +23,21 @@ public class ContextManager {
         this.sceneLoader = new ClSceneLoader(context);
     }
 
+    /**
+     * Lazily initialized so a failed device probe (e.g. the GPU not having recovered
+     * after a system suspend) does not permanently poison the class.
+     */
     public static ContextManager get() {
-        return instance;
+        ContextManager local = instance;
+        if (local == null) {
+            synchronized (ContextManager.class) {
+                local = instance;
+                if (local == null) {
+                    instance = local = new ContextManager(Device.getPreferredDevice());
+                }
+            }
+        }
+        return local;
     }
 
     public static synchronized void setDevice(Device device) {

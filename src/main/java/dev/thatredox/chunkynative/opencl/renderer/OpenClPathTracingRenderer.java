@@ -14,9 +14,12 @@ import org.jocl.*;
 
 import se.llbit.chunky.main.Chunky;
 import se.llbit.chunky.renderer.*;
+import se.llbit.chunky.renderer.export.PictureExportFormats;
 import se.llbit.chunky.renderer.scene.Scene;
+import se.llbit.log.Log;
 import se.llbit.util.TaskTracker;
 
+import java.io.File;
 import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.ForkJoinTask;
@@ -99,6 +102,13 @@ public class OpenClPathTracingRenderer implements Renderer {
 
                     boolean saveEvent = isSaveEvent(manager.getSnapshotControl(), scene, logicalSpp + bufferSppReal);
                     if (bufferMergeTask.isDone() || saveEvent) {
+                        // "Denoise now" button: run the denoiser on the current frame.
+                        if (OidnDenoiser.triggerDenoise) {
+                            OidnDenoiser.triggerDenoise = false;
+                            denoiseFrame(manager.context.getSceneDirectory(), scene, sampleBuffer,
+                                    scene.canvasConfig.getWidth(), scene.canvasConfig.getHeight());
+                        }
+
                         if (!scene.shouldFinalizeBuffer() && !saveEvent) {
                             long time = System.currentTimeMillis();
                             if (time - lastCallback > 100 && !manager.shouldFinalize()) {
@@ -114,6 +124,13 @@ public class OpenClPathTracingRenderer implements Renderer {
                         clEnqueueReadBuffer(context.context.queue, gpu.getBuffer().get(), CL_TRUE, 0,
                                 (long) Sizeof.cl_float * passBuffer.length, Pointer.to(passBuffer),
                                 0, null, null);
+
+                        // Stash the current albedo/normal guides so "Denoise now" can work
+                        // even when the GPU render is not active.
+                        if (OidnDenoiser.enabled || OidnDenoiser.lastAlbedo == null) {
+                            stashGuides(context.context.queue, gpu, passBuffer.length);
+                        }
+
                         int sampSpp = sceneSpp[0];
                         int passSpp = bufferSppReal;
                         double sinv = 1.0 / (sampSpp + passSpp);
@@ -135,6 +152,31 @@ public class OpenClPathTracingRenderer implements Renderer {
 
                 cameraGenTask.join();
                 bufferMergeTask.join();
+
+                // End-of-render OIDN denoising: when the render completed (target spp
+                // reached) or was deliberately stopped (paused). Merges any remaining
+                // frames so the denoiser sees the complete image, then displays the
+                // result and saves it to the scene's snapshots directory.
+                if (OidnDenoiser.enabled &&
+                        (logicalSpp + bufferSppReal >= scene.getTargetSpp() ||
+                                scene.getMode() == RenderMode.PAUSED)) {
+                    if (bufferSppReal > 0) {
+                        clEnqueueReadBuffer(context.context.queue, gpu.getBuffer().get(), CL_TRUE, 0,
+                                (long) Sizeof.cl_float * passBuffer.length, Pointer.to(passBuffer),
+                                0, null, null);
+                        int sampSpp = sceneSpp[0];
+                        int passSpp = bufferSppReal;
+                        double sinv = 1.0 / (sampSpp + passSpp);
+                        Arrays.parallelSetAll(sampleBuffer, i -> (sampleBuffer[i] * sampSpp + passBuffer[i] * passSpp) * sinv);
+                        sceneSpp[0] += passSpp;
+                        logicalSpp += passSpp;
+                        bufferSppReal = 0;
+                    }
+                    // Fresh guides straight from the GPU.
+                    stashGuides(context.context.queue, gpu, passBuffer.length);
+                    denoiseFrame(manager.context.getSceneDirectory(), scene, sampleBuffer,
+                            scene.canvasConfig.getWidth(), scene.canvasConfig.getHeight());
+                }
             }
 
         } finally {
@@ -144,6 +186,58 @@ public class OpenClPathTracingRenderer implements Renderer {
 
     private boolean isSaveEvent(SnapshotControl control, Scene scene, int spp) {
         return control.saveSnapshot(scene, spp) || control.saveRenderDump(scene, spp);
+    }
+
+    /**
+     * Run the OIDN denoiser on the current accumulated frame (beauty from the CPU sample
+     * buffer, guides from the stashed copies), display the result and save it to
+     * {@code <scene directory>/snapshots/<scene name>-<spp>_denoised.png}.
+     */
+    private static void denoiseFrame(File sceneDirectory, Scene scene, double[] sampleBuffer,
+                                     int width, int height) {
+        if (OidnDenoiser.lastAlbedo == null || OidnDenoiser.lastNormal == null) {
+            Log.warn("OIDN: no albedo/normal guides available yet - render a few frames first.");
+            return;
+        }
+        float[] beauty = new float[sampleBuffer.length];
+        float[] albedo = new float[sampleBuffer.length];
+        float[] normal = new float[sampleBuffer.length];
+        for (int i = 0; i < sampleBuffer.length; i++) {
+            beauty[i] = (float) sampleBuffer[i];
+        }
+        System.arraycopy(OidnDenoiser.lastAlbedo, 0, albedo, 0, albedo.length);
+        System.arraycopy(OidnDenoiser.lastNormal, 0, normal, 0, normal.length);
+
+        float[] denoised = OidnDenoiser.denoiseFinal(beauty, albedo, normal, width, height);
+        if (denoised == null) {
+            return;
+        }
+
+        for (int i = 0; i < sampleBuffer.length; i++) {
+            sampleBuffer[i] = denoised[i];
+        }
+        scene.postProcessFrame(TaskTracker.Task.NONE);
+        scene.setSaveSnapshots(true);
+        File snapshotsDir = new File(sceneDirectory, "snapshots");
+        snapshotsDir.mkdirs();
+        File snapshotFile = new File(snapshotsDir,
+                String.format("%s-%d_denoised.png", scene.name, scene.spp));
+        scene.saveFrame(snapshotFile, PictureExportFormats.PNG, TaskTracker.NONE);
+        Log.warn("OIDN: saved denoised snapshot " + snapshotFile.getAbsolutePath());
+    }
+
+    /**
+     * Copy the current albedo/normal GPU buffers into {@link OidnDenoiser}'s CPU stash.
+     */
+    private static void stashGuides(cl_command_queue queue, GpuSceneResources gpu, int length) {
+        float[] albedo = new float[length];
+        float[] normal = new float[length];
+        clEnqueueReadBuffer(queue, gpu.getAlbedoBuffer().get(), CL_TRUE, 0,
+                (long) Sizeof.cl_float * length, Pointer.to(albedo), 0, null, null);
+        clEnqueueReadBuffer(queue, gpu.getNormalBuffer().get(), CL_TRUE, 0,
+                (long) Sizeof.cl_float * length, Pointer.to(normal), 0, null, null);
+        OidnDenoiser.lastAlbedo = albedo;
+        OidnDenoiser.lastNormal = normal;
     }
 
     @Override

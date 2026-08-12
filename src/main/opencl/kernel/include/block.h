@@ -90,10 +90,10 @@ int BlockPalette_emitterFaceCount(BlockPalette self, int block) {
     switch (modelType) {
         default:
         case 0:
-        case 4:
         case 5:
             return 0;
         case 1:
+        case 4:
             return 6;
         case 2: {
             int count = 0;
@@ -200,9 +200,9 @@ bool BlockPalette_sampleEmitterFace(BlockPalette self, int block, int faceIndex,
     switch (modelType) {
         default:
         case 0:
-        case 4:
             return false;
         case 1:
+        case 4:
             if (faceIndex < 0 || faceIndex >= 6) return false;
             sample_unit_block_face(faceIndex, uv, outPos, outNormal, outArea);
             return true;
@@ -382,7 +382,7 @@ bool WaterModel_intersect(
     return hit;
 }
 
-bool BlockPalette_intersectNormalizedBlock(BlockPalette self, image2d_array_t atlas, MaterialPalette materialPalette, BiomeColors biome, int block, int3 blockPosition, Ray ray, IntersectionRecord* record, MaterialSample* sample) {
+bool BlockPalette_intersectNormalizedBlock(BlockPalette self, image2d_array_t atlas, MaterialPalette materialPalette, BiomeColors biome, bool emittersEnabled, int block, int3 blockPosition, Ray ray, IntersectionRecord* record, MaterialSample* sample) {
     // ANY_TYPE. Should not be intersected.
     if (block == 0x7FFFFFFE) {
         return false;
@@ -459,7 +459,33 @@ bool BlockPalette_intersectNormalizedBlock(BlockPalette self, image2d_array_t at
             return hit;
         }
         case 4: {
-            // Temporarily ignore invisible light blocks entirely.
+            // Invisible light block: never contributes visible surface color, but rays still
+            // intersect it so the emitter's light can be picked up directly and so it occludes
+            // shadow rays, matching the CPU renderer's LightBlockModel. Like the CPU, light
+            // blocks are fully transparent when emitters are disabled.
+            if (!emittersEnabled) {
+                return false;
+            }
+            AABB box = AABB_new(0.125f, 0.875f, 0.125f, 0.875f, 0.125f, 0.875f);
+            hit = AABB_full_intersect(box, tempRay, &tempRecord);
+            tempRecord.material = modelPointer;
+            if (hit) {
+                if (tempRecord.normal.x > 0 || tempRecord.normal.z < 0) {
+                    tempRecord.texCoord.x = 1 - tempRecord.texCoord.x;
+                }
+                if (tempRecord.normal.y > 0) {
+                    tempRecord.texCoord.y = 1 - tempRecord.texCoord.y;
+                }
+
+                Material material = Material_get(materialPalette, tempRecord.material);
+                hit = Material_sample_mode(material, atlas, tempRecord.texCoord, true, blockPosition, biome, sample);
+                if (hit) {
+                    tempRecord.block = block;
+                    *record = tempRecord;
+                    return true;
+                }
+                return false;
+            }
             return false;
         }
         case 5: {

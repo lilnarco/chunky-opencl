@@ -51,6 +51,8 @@ typedef struct {
     float roughness;
 } MaterialSample;
 
+bool Material_isRefractive(Material self);
+
 bool Material_sample_mode(Material self, image2d_array_t atlas, float2 uv, bool allowTransparentHit, int3 worldPos, BiomeColors biome, MaterialSample* sample);
 
 bool Material_sample(Material self, image2d_array_t atlas, float2 uv, int3 worldPos, BiomeColors biome, MaterialSample* sample) {
@@ -66,14 +68,19 @@ bool Material_sample_mode(Material self, image2d_array_t atlas, float2 uv, bool 
         color = colorFromArgb(self.color);
     
     if (self.tint == 0xFE000000) {
-        // Light block
-        sample->color.xyz = 0.5;
+        // Light block: CPU sets ray.color = (1,1,1,1) on hit; the quadratic emittance
+        // mapping (color^2 * emittance) then matches the CPU contribution exactly.
+        sample->color.xyz = 1.0;
         sample->color.w = 1.0;
     } else if (color.w > EPS) {
         sample->color = color;
-    } else if (allowTransparentHit) {
+    } else if (allowTransparentHit && Material_isRefractive(self)) {
+        // Fully transparent texel on glass: keep the medium interface for refraction,
+        // but do not render a visible back-face frame.
         sample->color = (float4)(1.0f, 1.0f, 1.0f, 0.0f);
     } else {
+        // Fully transparent texel on a non-refractive translucent block (cherry leaves,
+        // tinted glass, etc.): no hit, matching the CPU's alpha check in Block.intersect.
         return false;
     }
 
@@ -103,11 +110,11 @@ bool Material_sample_mode(Material self, image2d_array_t atlas, float2 uv, bool 
         sample->color.w = fmin(1.0f, sample->color.w + 0.15f);
     }
 
-    // (Normal) emittance
+    // (Normal) emittance — packed as full float bits to preserve intensities > 1.
     if (self.flags & 0b00010)
         sample->emittance = Atlas_read_uv(uv.x, uv.y, self.normal_emittance, self.textureSize, atlas).w;
     else
-        sample->emittance = (self.normal_emittance & 0xFF) / 255.0;
+        sample->emittance = as_float(self.normal_emittance);
 
     // specular, metalness, roughness
     if (self.flags & 0b00100) {
@@ -130,6 +137,10 @@ bool Material_isRefractive(Material self) {
 
 bool Material_isOpaque(Material self) {
     return (self.flags & 0b10000) != 0;
+}
+
+bool Material_isWater(Material self) {
+    return (self.flags & 0b100000) != 0;
 }
 
 float Material_ior(Material self) {

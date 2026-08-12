@@ -9,6 +9,7 @@
 #include "bvh.h"
 #include "sky.h"
 #include "biome.h"
+#include "atmosphere.h"
 
 typedef struct {
     __global const int* meta;
@@ -87,11 +88,13 @@ typedef struct {
     MaterialPalette materialPalette;
     BiomeColors biome;
     EmitterGrid emitterGrid;
+    Atmosphere atmosphere;
     int drawDepth;
+    bool emittersEnabled;
 } Scene;
 
 bool closestIntersect(Scene self, image2d_array_t atlas, Ray ray, IntersectionRecord* record, MaterialSample* sample, Material* mat);
 void initialize_ray_medium(Scene scene, Ray* ray);
-void intersectSky(image2d_t skyTexture, float skyIntensity, Sun sun, image2d_array_t atlas, Ray ray, MaterialSample* sample);
+void intersectSky(image2d_t skyTexture, Sun sun, image2d_array_t atlas, Atmosphere atmosphere, Ray ray, MaterialSample* sample);
 
 #endif

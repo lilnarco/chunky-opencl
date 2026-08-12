@@ -13,6 +13,7 @@ typedef struct {
     int texture;
     float intensity;
     float luminosity;
+    float luminosityPdf;
     float3 su;
     float3 sv;
     float3 sw;
@@ -26,6 +27,7 @@ Sun Sun_new(__global const int* data) {
     sun.texture = data[2];
     sun.intensity = as_float(data[3]);
     sun.luminosity = as_float(data[6]);
+    sun.luminosityPdf = as_float(data[8]);
     sun.color = colorFromArgb(data[7]);
     
     float phi = as_float(data[4]);
@@ -77,10 +79,9 @@ bool Sun_intersect(Sun self, image2d_array_t atlas, Ray ray, MaterialSample* sam
 }
 
 bool Sun_sampleDirection(Sun self, Ray* ray, Random random) {
-    if (!(self.flags & 1)) {
-        return false;
-    }
-
+    // Sun illumination is independent of the "draw sun" toggle (which only controls the
+    // disk sprite), matching the CPU renderer. A sun below the horizon produces no light
+    // anyway because the shadow ray hits the ground.
     float radius_cos = cos(0.03f);
 
     float x1 = Random_nextFloat(random);
@@ -104,17 +105,22 @@ float3 Sun_emittance(Sun self) {
     return self.color.xyz * pow(self.intensity, 2.2f);
 }
 
-const sampler_t skySampler = CLK_NORMALIZED_COORDS_TRUE  | CLK_ADDRESS_MIRRORED_REPEAT | CLK_FILTER_LINEAR;
+// The sky texture is a float (HDR) image; OpenCL 1.2 only guarantees nearest-neighbor
+// filtering for float formats, so the sky is baked at a high resolution instead.
+const sampler_t skySampler = CLK_NORMALIZED_COORDS_TRUE  | CLK_ADDRESS_MIRRORED_REPEAT | CLK_FILTER_NEAREST;
 
-void Sky_intersect(image2d_t skyTexture, float skyIntensity, Ray ray, MaterialSample* sample) {
-    float3 direction = ray.direction;
-
+float3 Sky_sampleDirection(image2d_t skyTexture, float3 direction) {
     float theta = atan2(direction.z, direction.x);
     theta /= M_PI_F * 2;
     theta = fmod(fmod(theta, 1) + 1, 1);
     float phi = (asin(clamp(direction.y, -1.0f, 1.0f)) + M_PI_2_F) * M_1_PI_F;
 
-    sample->color = read_imagef(skyTexture, skySampler, (float2) (theta, phi)) * skyIntensity;
+    return read_imagef(skyTexture, skySampler, (float2) (theta, phi)).xyz;
+}
+
+void Sky_intersect(image2d_t skyTexture, Ray ray, MaterialSample* sample) {
+    sample->color.xyz = Sky_sampleDirection(skyTexture, ray.direction);
+    sample->color.w = 1.0;
     sample->emittance = 1.0;
 }
 

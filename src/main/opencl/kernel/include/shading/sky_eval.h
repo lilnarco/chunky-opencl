@@ -45,7 +45,21 @@ float4 getDirectLightAttenuation(
     return attenuation;
 }
 
-void intersectSky(image2d_t skyTexture, float skyIntensity, Sun sun, image2d_array_t atlas, Ray ray, MaterialSample* sample) {
-    Sky_intersect(skyTexture, skyIntensity, ray, sample);
+void intersectSky(image2d_t skyTexture, Sun sun, image2d_array_t atlas, Atmosphere atmosphere, Ray ray, MaterialSample* sample) {
+    Sky_intersect(skyTexture, ray, sample);
     Sun_intersect(sun, atlas, ray, sample);
+
+    // Uniform fog: blend the sky color toward the fog color, strongest at the horizon.
+    if (atmosphere.fogMode == 1 && atmosphere.uniformDensity > 0.0f) {
+        float fog;
+        if (ray.direction.y > 0.0f) {
+            float dy = 1.0f - ray.direction.y;
+            fog = dy * dy;
+        } else {
+            fog = 1.0f;
+        }
+        fog *= atmosphere.skyFogDensity;
+        fog = clamp(fog, 0.0f, 1.0f);
+        sample->color.xyz = mix(sample->color.xyz, atmosphere.fogColor, fog);
+    }
 }

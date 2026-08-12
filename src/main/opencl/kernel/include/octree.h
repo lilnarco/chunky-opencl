@@ -55,6 +55,6 @@ int Octree_get(Octree* self, int x, int y, int z) {
     return -data;
 }
 
-bool Octree_octreeIntersect(Octree self, image2d_array_t atlas, BlockPalette palette, MaterialPalette materialPalette, BiomeColors biome, int drawDepth, Ray ray, IntersectionRecord* record, MaterialSample* sample);
+bool Octree_octreeIntersect(Octree self, image2d_array_t atlas, BlockPalette palette, MaterialPalette materialPalette, BiomeColors biome, int drawDepth, bool emittersEnabled, Ray ray, IntersectionRecord* record, MaterialSample* sample);
 
 #endif

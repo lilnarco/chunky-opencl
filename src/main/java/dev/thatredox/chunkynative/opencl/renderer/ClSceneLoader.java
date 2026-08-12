@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.lang.ref.WeakReference;
 
 import static org.jocl.CL.CL_MEM_COPY_HOST_PTR;
 import static org.jocl.CL.CL_MEM_READ_ONLY;
@@ -53,6 +54,8 @@ public class ClSceneLoader extends AbstractSceneLoader {
     protected ClIntBuffer emitterGridCells = null;
     protected ClIntBuffer emitterGridIndexes = null;
     protected ClIntBuffer emitterGridEmitters = null;
+    protected WeakReference<Grid> prevEmitterGrid = new WeakReference<>(null, null);
+    protected int[] prevEmitterGridBlockMapping = null;
     protected ClIntBuffer biomeMeta = null;
     protected ClIntBuffer biomeGrid = null;
     protected ClMemory biomeGrass = null;
@@ -91,12 +94,21 @@ public class ClSceneLoader extends AbstractSceneLoader {
     }
 
     private void loadEmitterGrid(Scene scene) {
+        Grid grid = scene.getEmitterGrid();
+        // The grid only changes when the world/palette changes, not on camera moves or
+        // lighting edits. Cache the GPU buffers on the Grid instance + block mapping so
+        // ordinary scene resets don't rebuild and re-upload them every frame.
+        if (grid == prevEmitterGrid.get() && prevEmitterGridBlockMapping == blockMapping && emitterGridMeta != null) {
+            return;
+        }
+        prevEmitterGrid = new WeakReference<>(grid, null);
+        prevEmitterGridBlockMapping = blockMapping;
+
         if (emitterGridMeta != null) emitterGridMeta.close();
         if (emitterGridCells != null) emitterGridCells.close();
         if (emitterGridIndexes != null) emitterGridIndexes.close();
         if (emitterGridEmitters != null) emitterGridEmitters.close();
 
-        Grid grid = scene.getEmitterGrid();
         if (grid == null || blockMapping == null) {
             emitterGridMeta = new ClIntBuffer(new int[] {0, 0, 0, 0, 0, 0, 0}, context);
             emitterGridCells = new ClIntBuffer(new int[] {0, 0}, context);

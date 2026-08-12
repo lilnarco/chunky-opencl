@@ -1,6 +1,6 @@
 #include "octree.h"
 
-bool Octree_octreeIntersect(Octree self, image2d_array_t atlas, BlockPalette palette, MaterialPalette materialPalette, BiomeColors biome, int drawDepth, Ray ray, IntersectionRecord* record, MaterialSample* sample) {
+bool Octree_octreeIntersect(Octree self, image2d_array_t atlas, BlockPalette palette, MaterialPalette materialPalette, BiomeColors biome, int drawDepth, bool emittersEnabled, Ray ray, IntersectionRecord* record, MaterialSample* sample) {
     float distMarch = 0;
 
     float3 invD = 1 / ray.direction;
@@ -51,7 +51,7 @@ bool Octree_octreeIntersect(Octree self, image2d_array_t atlas, BlockPalette pal
         if (data != 0) {
             IntersectionRecord tempRecord = *record;
             MaterialSample tempSample;
-            if (BlockPalette_intersectNormalizedBlock(palette, atlas, materialPalette, biome, data, bp, ray, &tempRecord, &tempSample)) {
+            if (BlockPalette_intersectNormalizedBlock(palette, atlas, materialPalette, biome, emittersEnabled, data, bp, ray, &tempRecord, &tempSample)) {
                 if (ray.currentMaterial != 0 && tempRecord.material == ray.currentMaterial) {
                     distMarch += tempRecord.distance + OFFSET;
                     continue;

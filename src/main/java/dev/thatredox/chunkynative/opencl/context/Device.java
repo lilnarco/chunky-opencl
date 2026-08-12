@@ -84,10 +84,30 @@ public class Device {
         // Enable exceptions
         CL.setExceptionsEnabled(true);
 
-        // Obtain the number of platforms
-        int[] numPlatformsArray = new int[1];
-        clGetPlatformIDs(0, null, numPlatformsArray);
-        int numPlatforms = numPlatformsArray[0];
+        // Obtain the number of platforms. After a system suspend the OpenCL driver may
+        // need a moment to recover, so retry the enumeration a few times before giving up.
+        int numPlatforms = 0;
+        CLException lastError = null;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try {
+                int[] numPlatformsArray = new int[1];
+                clGetPlatformIDs(0, null, numPlatformsArray);
+                numPlatforms = numPlatformsArray[0];
+                lastError = null;
+                break;
+            } catch (CLException e) {
+                lastError = e;
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        if (lastError != null) {
+            throw lastError;
+        }
 
         // Obtain all platform IDs
         cl_platform_id[] platforms = new cl_platform_id[numPlatforms];

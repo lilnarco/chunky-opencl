@@ -10,74 +10,95 @@ import org.jocl.*;
 
 import se.llbit.chunky.renderer.scene.Scene;
 import se.llbit.chunky.renderer.scene.sky.Sky;
-import se.llbit.chunky.renderer.scene.sky.SkyCache;
-import se.llbit.log.Log;
+import se.llbit.chunky.resources.Texture;
 import se.llbit.math.Ray;
 
 import java.lang.reflect.Field;
+import java.util.stream.IntStream;
 
 public class ClSky implements AutoCloseable {
+    /** Maximum sky bake width. 8192x4096 (CL_FLOAT RGBA) = 512 MB VRAM. */
+    private static final int MAX_SKY_RESOLUTION = 8192;
+    /** Fraction of the device's global memory budgeted for the sky texture. */
+    private static final double SKY_MEMORY_BUDGET = 0.25;
+    /** Bytes per texel for a CL_FLOAT RGBA image. */
+    private static final int BYTES_PER_TEXEL = 16;
+
     public final ClMemory skyTexture;
-    public final ClMemory skyIntensity;
     private final ClContext context;
 
     public ClSky(Scene scene, ClContext context) {
         this.context = context;
-        int textureResolution = getTextureResolution(scene);
+        int textureResolution = getBakeResolution(scene, context);
+        int height = textureResolution / 2;
 
-        this.skyIntensity = new ClMemory(clCreateBuffer(context.context,
-                CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, Sizeof.cl_float,
-                Pointer.to(new float[] {(float) scene.sun().getIntensity()}), null));
-
+        // Float (HDR) image so bright HDRI values survive the bake. Storing HDR values in
+        // an 8-bit texture wraps them modulo 256 into garbage colors.
         cl_image_format fmt = new cl_image_format();
-        fmt.image_channel_data_type = CL_UNORM_INT8;
+        fmt.image_channel_data_type = CL_FLOAT;
         fmt.image_channel_order = CL_RGBA;
 
         cl_image_desc desc = new cl_image_desc();
         desc.image_type = CL_MEM_OBJECT_IMAGE2D;
         desc.image_width = textureResolution;
-        desc.image_height = textureResolution;
+        desc.image_height = height;
 
-        byte[] texture = new byte[textureResolution * textureResolution * 4];
-        Ray ray = new Ray();
-        for (int i = 0; i < textureResolution; i++) {
-            for (int j = 0; j < textureResolution; j++) {
+        float[] texture = new float[textureResolution * height * 4];
+        IntStream.range(0, height).parallel().forEach(j -> {
+            Ray ray = new Ray();
+            for (int i = 0; i < textureResolution; i++) {
                 int offset = 4 * (j * textureResolution + i);
 
                 double theta = ((double) i / textureResolution) * 2 * FastMath.PI;
-                double phi = ((double) j / textureResolution) * FastMath.PI - FastMath.PI / 2;
+                double phi = ((double) j / height) * FastMath.PI - FastMath.PI / 2;
                 double r = FastMath.cos(phi);
                 ray.d.set(FastMath.cos(theta) * r, FastMath.sin(phi), FastMath.sin(theta) * r);
 
                 scene.sky().getSkyColor(ray, false);
-                texture[offset + 0] = (byte) (ray.color.x * 255);
-                texture[offset + 1] = (byte) (ray.color.y * 255);
-                texture[offset + 2] = (byte) (ray.color.z * 255);
-                texture[offset + 3] = (byte) 255;
+                texture[offset + 0] = (float) ray.color.x;
+                texture[offset + 1] = (float) ray.color.y;
+                texture[offset + 2] = (float) ray.color.z;
+                texture[offset + 3] = 1.0f;
             }
-        }
+        });
 
         this.skyTexture = new ClMemory(clCreateImage(context.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                 fmt, desc, Pointer.to(texture), null));
     }
 
-    private static int getTextureResolution(Scene scene) {
+    /**
+     * Pick the sky bake resolution: the smallest of the skymap's own width, the device's
+     * maximum image width, a memory budget derived from the device's global memory, and
+     * the hard 8k cap. Falls back to 4096 for procedural skies.
+     */
+    private static int getBakeResolution(Scene scene, ClContext context) {
+        int skymapWidth = getSkymapWidth(scene);
+        long maxImageWidth = context.device.getDeviceLongs(CL_DEVICE_IMAGE2D_MAX_WIDTH, 1)[0];
+        long globalMem = context.device.getDeviceLongs(CL_DEVICE_GLOBAL_MEM_SIZE, 1)[0];
+        long memoryBudget = (long) Math.sqrt((globalMem * SKY_MEMORY_BUDGET) / BYTES_PER_TEXEL);
+        long resolution = Math.min(MAX_SKY_RESOLUTION, Math.min(skymapWidth, Math.min(maxImageWidth, memoryBudget)));
+        resolution &= ~15L;
+        if (resolution < 256) {
+            resolution = 256;
+        }
+        return (int) resolution;
+    }
+
+    private static int getSkymapWidth(Scene scene) {
         try {
             Sky sky = scene.sky();
-            Field skyCacheField = sky.getClass().getDeclaredField("skyCache");
-            skyCacheField.setAccessible(true);
-            SkyCache skyCache = (SkyCache) skyCacheField.get(sky);
-
-            return skyCache.getSkyResolution();
+            Field skymapField = sky.getClass().getDeclaredField("skymap");
+            skymapField.setAccessible(true);
+            Texture skymap = (Texture) skymapField.get(sky);
+            int width = skymap.getWidth();
+            return width > 0 ? width : 4096;
         } catch (NoSuchFieldException | IllegalAccessException e) {
-            Log.error(e);
-            throw new RuntimeException();
+            return 4096;
         }
     }
 
     @Override
     public void close() {
         skyTexture.close();
-        skyIntensity.close();
     }
 }

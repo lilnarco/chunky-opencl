@@ -43,6 +43,11 @@ public class ChunkyCl implements Plugin {
         } catch (UnsatisfiedLinkError e) {
             Log.error("Failed to load ChunkyCL. Could not load OpenCL native library.", e);
             return;
+        } catch (ExceptionInInitializerError | org.jocl.CLException e) {
+            Log.error("Failed to initialize OpenCL. The GPU may not have recovered after a system " +
+                    "suspend; try re-logging in or restarting the graphics driver. Chunky will " +
+                    "continue with the CPU renderer.", e);
+            return;
         }
 
         Chunky.addRenderer(new OpenClPathTracingRenderer());

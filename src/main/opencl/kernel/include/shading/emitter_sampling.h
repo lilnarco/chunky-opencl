@@ -42,7 +42,7 @@ float3 sampleEmitterFace(
     shadowRay.currentBlock = 0;
     shadowRay.flags = RAY_INDIRECT;
 
-    float traveled = 0.0f;
+    float traveled = OFFSET;
     float3 attenuation = (float3)(1.0f, 1.0f, 1.0f);
     while (traveled < distance) {
         IntersectionRecord record = IntersectionRecord_new();
@@ -53,8 +53,8 @@ float3 sampleEmitterFace(
         }
 
         traveled += record.distance;
-        if (traveled >= distance - (2.0f * OFFSET)) {
-            if (record.block != emitter.w || sample.emittance <= EPS) {
+        if (fabs(traveled - distance) <= (2.0f * OFFSET)) {
+            if (sample.emittance <= EPS) {
                 return (float3)(0.0f);
             }
             float e = fabs(dot(direction, record.normal));

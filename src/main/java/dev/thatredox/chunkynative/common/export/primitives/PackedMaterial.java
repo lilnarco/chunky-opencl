@@ -23,12 +23,14 @@ public class PackedMaterial implements Packer {
     public static final int FLAG_HAS_SPECULAR_METALNESS_ROUGHNESS_TEXTURE = 0b00100;
     public static final int FLAG_REFRACTIVE = 0b01000;
     public static final int FLAG_OPAQUE = 0b10000;
+    public static final int FLAG_WATER = 0b100000;
 
     public final boolean hasColorTexture;
     public final boolean hasNormalEmittanceTexture;
     public final boolean hasSpecularMetalnessRoughnessTexture;
     public final boolean refractive;
     public final boolean opaque;
+    public final boolean water;
 
     public final int blockTint;
 
@@ -41,17 +43,40 @@ public class PackedMaterial implements Packer {
         return new PackedMaterial();
     }
 
+    /**
+     * Opaque white material used by the GPU cloud renderer. It is reserved at palette
+     * index 1 so cloud intersection records can reference it by a fixed id.
+     */
+    public static PackedMaterial cloud() {
+        return new PackedMaterial(true);
+    }
+
     private PackedMaterial() {
         this.hasColorTexture = false;
         this.hasNormalEmittanceTexture = false;
         this.hasSpecularMetalnessRoughnessTexture = false;
         this.refractive = false;
         this.opaque = false;
+        this.water = false;
         this.blockTint = 0;
         this.colorTexture = 0;
         this.normalEmittanceTexture = 0;
         this.specularMetalnessRoughnessTexture = 0;
         this.ior = Float.floatToIntBits(1.000293f);
+    }
+
+    private PackedMaterial(boolean isCloud) {
+        this.hasColorTexture = false;
+        this.hasNormalEmittanceTexture = false;
+        this.hasSpecularMetalnessRoughnessTexture = false;
+        this.refractive = false;
+        this.opaque = true;
+        this.water = false;
+        this.blockTint = 0;
+        this.colorTexture = 0xFFFFFFFFL;
+        this.normalEmittanceTexture = Float.floatToIntBits(0.0f);
+        this.specularMetalnessRoughnessTexture = 0;
+        this.ior = Float.floatToIntBits(1.0f);
     }
 
     public PackedMaterial(Texture texture, Tint tint, Material material, AbstractTextureLoader texturePalette) {
@@ -105,9 +130,10 @@ public class PackedMaterial implements Packer {
         this.hasSpecularMetalnessRoughnessTexture = false;
         this.refractive = effectivelyRefractive;
         this.opaque = opaque;
+        this.water = texture == Texture.water;
         this.blockTint = blockTint;
         this.colorTexture = this.hasColorTexture ? texMap.get(texture).get() : texture.getAvgColor();
-        this.normalEmittanceTexture = (int) (emittance * 255.0);
+        this.normalEmittanceTexture = Float.floatToIntBits(emittance);
         this.specularMetalnessRoughnessTexture = (int) (specular * 255.0) |
                 ((int) (metalness * 255.0) << 8) |
                 ((int) (roughness * 255.0) << 16);
@@ -121,6 +147,7 @@ public class PackedMaterial implements Packer {
      *            0b00100 = has specular metalness roughness texture
      *            0b01000 = refractive
      *            0b10000 = opaque
+     *            0b100000 = water
      * 1: Block tint - the top 8 bits control which type of tint:
      *                 0xFF = lower 24 bits should be interpreted as RGB color
      *                 0x01 = foliage color
@@ -128,7 +155,7 @@ public class PackedMaterial implements Packer {
      *                 0x03 = water color
      *                 0x04 = dry foliage color
      * 2 & 3: Color texture reference
-     * 4: Top 24 bits represent the surface normal. First 8 bits represent the emittance.
+     * 4: Emittance as float bits (no 8-bit quantization, supports intensities > 1).
      * 5: First 8 bits represent the specularness. Next 8 bits represent the metalness. Next 8 bits represent the roughness.
      * 6: IoR as float bits.
      */
@@ -139,7 +166,8 @@ public class PackedMaterial implements Packer {
                    (this.hasNormalEmittanceTexture ? FLAG_HAS_NORMAL_EMITTANCE_TEXTURE : 0) |
                    (this.hasSpecularMetalnessRoughnessTexture ? FLAG_HAS_SPECULAR_METALNESS_ROUGHNESS_TEXTURE : 0) |
                    (this.refractive ? FLAG_REFRACTIVE : 0) |
-                   (this.opaque ? FLAG_OPAQUE : 0));
+                   (this.opaque ? FLAG_OPAQUE : 0) |
+                   (this.water ? FLAG_WATER : 0));
         packed.add(this.blockTint);
         packed.add((int) (this.colorTexture >>> 32));
         packed.add((int) this.colorTexture);

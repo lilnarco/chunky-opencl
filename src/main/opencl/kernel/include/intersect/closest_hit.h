@@ -2,14 +2,21 @@
 
 bool closestIntersect(Scene self, image2d_array_t atlas, Ray ray, IntersectionRecord* record, MaterialSample* sample, Material* mat) {
     bool hit = false;
+
+    // 0. 雲層優先測試 (與 CPU 的 nextIntersection 一致)
+    if (self.atmosphere.cloudsEnabled) {
+        if (Cloud_intersect(self.atmosphere, ray, record, sample)) {
+            hit = true;
+        }
+    }
     
     // 1. 優先測試 Octree (通常是場景中最密集的物體)
-    if (Octree_octreeIntersect(self.octree, atlas, self.blockPalette, self.materialPalette, self.biome, self.drawDepth, ray, record, sample)) {
+    if (Octree_octreeIntersect(self.octree, atlas, self.blockPalette, self.materialPalette, self.biome, self.drawDepth, self.emittersEnabled, ray, record, sample)) {
         hit = true;
     }
     
     // 2. 測試水面 Octree (只有在距離比目前撞到的更短時才有意義)
-    if (Octree_octreeIntersect(self.waterOctree, atlas, self.blockPalette, self.materialPalette, self.biome, self.drawDepth, ray, record, sample)) {
+    if (Octree_octreeIntersect(self.waterOctree, atlas, self.blockPalette, self.materialPalette, self.biome, self.drawDepth, self.emittersEnabled, ray, record, sample)) {
         hit = true;
     }
 
