@@ -56,6 +56,7 @@ public class ClSceneLoader extends AbstractSceneLoader {
     protected ClIntBuffer emitterGridEmitters = null;
     protected WeakReference<Grid> prevEmitterGrid = new WeakReference<>(null, null);
     protected int[] prevEmitterGridBlockMapping = null;
+    private int waterMaterialId = 0;
     protected ClIntBuffer biomeMeta = null;
     protected ClIntBuffer biomeGrid = null;
     protected ClMemory biomeGrass = null;
@@ -89,8 +90,19 @@ public class ClSceneLoader extends AbstractSceneLoader {
             }
             loadEmitterGrid(scene);
             loadBiomeColors(scene);
+            // The first packed water model's material is shared by all water (the material
+            // palette dedups by content), so it represents the water surface material.
+            if (waterPalette instanceof ClPackedResourcePalette) {
+                ClPackedResourcePalette<PackedWaterModel> packed = (ClPackedResourcePalette<PackedWaterModel>) waterPalette;
+                waterMaterialId = packed.size() > 0 ? packed.getData(0) : 0;
+            }
         }
         return loadSuccess;
+    }
+
+    /** Material palette index of the water material (0 = air when no water is present). */
+    public int getWaterMaterialId() {
+        return waterMaterialId;
     }
 
     private void loadEmitterGrid(Scene scene) {

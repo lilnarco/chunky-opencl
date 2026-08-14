@@ -9,6 +9,41 @@ bool closestIntersect(Scene self, image2d_array_t atlas, Ray ray, IntersectionRe
             hit = true;
         }
     }
+
+    // Water plane (CPU's waterPlaneIntersection): infinite horizontal plane below the
+    // loaded chunks, entering from above with the water material and exiting from
+    // below with air.
+    if (self.atmosphere.waterPlaneEnabled && fabs(ray.direction.y) > EPS) {
+        Profile_inc(self.profile, self.profileCounters, PROFILE_WATER_PLANE_TESTS);
+        float t = (self.atmosphere.waterPlaneY - ray.origin.y) / ray.direction.y;
+        if (t > EPS && t < record->distance) {
+            IntersectionRecord planeRecord = *record;
+            planeRecord.distance = t;
+            planeRecord.block = 0;
+            float3 wp = ray.origin + ray.direction * t;
+            float2 uv = (float2)(fmod(fabs(wp.x), 1.0f), fmod(fabs(wp.z), 1.0f));
+            if (ray.direction.y < 0.0f) {
+                planeRecord.normal = (float3)(0.0f, 1.0f, 0.0f);
+                planeRecord.material = self.atmosphere.waterMaterial;
+                Material waterMat = Material_get(self.materialPalette, planeRecord.material);
+                if (Material_sample_mode(waterMat, atlas, uv, false, intFloorFloat3(wp), self.biome, sample)) {
+                    sample->color.w = self.atmosphere.waterOpacity;
+                    *record = planeRecord;
+                    hit = true;
+                }
+            } else {
+                // Exiting the water plane from below.
+                planeRecord.normal = (float3)(0.0f, -1.0f, 0.0f);
+                planeRecord.material = 0;
+                Material waterMat = Material_get(self.materialPalette, self.atmosphere.waterMaterial);
+                if (Material_sample_mode(waterMat, atlas, uv, false, intFloorFloat3(wp), self.biome, sample)) {
+                    sample->color.w = self.atmosphere.waterOpacity;
+                    *record = planeRecord;
+                    hit = true;
+                }
+            }
+        }
+    }
     
     // 1. 優先測試 Octree (通常是場景中最密集的物體)
     if (Octree_octreeIntersect(self.octree, atlas, self.blockPalette, self.materialPalette, self.biome, self.drawDepth, self.emittersEnabled, ray, record, sample)) {

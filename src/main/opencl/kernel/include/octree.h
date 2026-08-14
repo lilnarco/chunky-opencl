@@ -22,15 +22,27 @@ typedef struct {
     __global const int* treeData;
     AABB bounds;
     int depth;
-    int virtualDepth;
+    // Invariant per frame; hoisted out of the per-march computation.
+    float dynamicOffset;
+    bool profile;
+    __global int* profileCounters;
 } Octree;
 
-Octree Octree_create(__global const int* treeData, int depth, int virtualDepth) {
+static inline Octree Octree_profile(Octree octree, bool enabled, __global int* counters) {
+    octree.profile = enabled;
+    octree.profileCounters = counters;
+    return octree;
+}
+
+Octree Octree_create(__global const int* treeData, int depth, float maxCoord) {
     Octree octree;
     octree.treeData = treeData;
     octree.depth = depth;
-    // virtualDepth 僅用於計算動態 Offset 以保證大座標下的精度
-    octree.virtualDepth = max(depth, virtualDepth);
+    // The dynamic offset is derived from the maximum coordinate magnitude (octree
+    // extent, camera distance, ...), computed on the host.
+    octree.dynamicOffset = Ray_dynamicOffset(maxCoord);
+    octree.profile = false;
+    octree.profileCounters = (__global int*)0;
     // 重要：碰撞邊界必須使用真實深度 (depth)，
     // 這樣 AABB_quick_intersect 才能將平行射線正確推送到實體方塊區域，解決 Y-Clip 精度遺失問題。
     octree.bounds = AABB_new(0, 1<<depth, 0, 1<<depth, 0, 1<<depth);

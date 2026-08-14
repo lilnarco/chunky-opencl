@@ -5,7 +5,7 @@ bool Octree_octreeIntersect(Octree self, image2d_array_t atlas, BlockPalette pal
 
     float3 invD = 1 / ray.direction;
     // 使用虛擬深度的最大值來計算 Offset，確保在大範圍下不會因為浮點數精度導致射線停滯。
-    float rayOffset = Ray_dynamicOffset((float)(1 << self.virtualDepth));
+    float rayOffset = self.dynamicOffset;
     float3 offsetD = ray.direction * rayOffset;
 
     int depth = self.depth;
@@ -26,6 +26,8 @@ bool Octree_octreeIntersect(Octree self, image2d_array_t atlas, BlockPalette pal
             // There's already been a closer intersection!
             return false;
         }
+
+        Profile_inc(self.profile, self.profileCounters, PROFILE_OCTREE_STEPS);
 
         float3 pos = ray.origin + ray.direction * distMarch;
         int3 bp = intFloorFloat3(pos + offsetD);

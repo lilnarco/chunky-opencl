@@ -32,7 +32,7 @@ public class ChunkyClTab implements RenderControlsTab {
 
     // 靜態變數供渲染器存取
     public static float russianRouletteThreshold = 50.0f;
-    public static int virtualDepth = 16;
+    public static boolean profileRender = false;
 
     public ChunkyClTab(Scene scene) {
         this.scene = scene;
@@ -55,20 +55,14 @@ public class ChunkyClTab implements RenderControlsTab {
         });
         box.getChildren().addAll(rrLabel, rrSlider);
 
-        // Virtual Depth UI
-        Label vdLabel = new Label("Virtual Depth: 16 (65536 Blocks)");
-        Slider vdSlider = new Slider(7, 16, 16);
-        vdSlider.setMajorTickUnit(1);
-        vdSlider.setMinorTickCount(0);
-        vdSlider.setSnapToTicks(true);
-        vdSlider.setShowTickLabels(true);
-        vdSlider.valueProperty().addListener((obs, oldVal, newVal) -> {
-            virtualDepth = newVal.intValue();
-            int blocks = 1 << virtualDepth;
-            vdLabel.setText(String.format("Virtual Depth: %d (%d Blocks)", virtualDepth, blocks));
+        // Kernel profiling UI
+        CheckBox profileCheck = new CheckBox("Profile render (kernel operation counters)");
+        profileCheck.setSelected(ChunkyClTab.profileRender);
+        profileCheck.selectedProperty().addListener((obs, oldVal, newVal) -> {
+            ChunkyClTab.profileRender = newVal;
             scene.softRefresh();
         });
-        box.getChildren().addAll(vdLabel, vdSlider);
+        box.getChildren().add(profileCheck);
 
         // OIDN denoiser UI
         Label denoiseLabel = new Label("OIDN Denoiser:");

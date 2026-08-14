@@ -11,6 +11,8 @@ bool Bvh_intersect(Bvh self, image2d_array_t atlas, MaterialPalette palette, Bio
     float3 invDir = 1 / ray.direction;
 
     while (true) {
+        Profile_inc(self.profile, self.profileCounters, PROFILE_BVH_NODE_TESTS);
+
         node[0] = self.bvh[currentNode];
 
         if (node[0] <= 0) {

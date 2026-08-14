@@ -287,6 +287,12 @@ bool TexturedAABB_intersect(TexturedAABB self, image2d_array_t atlas, MaterialPa
     }
 
     Material material = Material_get(materialPalette, tempRecord.material);
+    if ((ray.flags & RAY_OCCLUDER) && Material_isOpaqueOccluder(material)) {
+        // Shadow ray through an opaque non-emissive surface: no texture read needed.
+        MaterialSample_opaque(sample);
+        *record = tempRecord;
+        return true;
+    }
     if (Material_sample_mode(material, atlas, tempRecord.texCoord, false, blockPos, biome, sample)) {
         *record = tempRecord;
         return true;
@@ -347,6 +353,15 @@ bool Quad_intersect(Quad self, image2d_array_t atlas, MaterialPalette materialPa
             if (u >= 0 && u <= 1 && v >= 0 && v <= 1) {
                 float2 texCoord = (float2) (self.uv.x + (u * self.uv.y), self.uv.z + (v * self.uv.w));
                 Material material = Material_get(materialPalette, self.material);
+                if ((ray.flags & RAY_OCCLUDER) && Material_isOpaqueOccluder(material)) {
+                    // Shadow ray through an opaque non-emissive surface: no texture read.
+                    MaterialSample_opaque(sample);
+                    record->texCoord = texCoord;
+                    record->normal = n;
+                    record->distance = t;
+                    record->material = self.material;
+                    return true;
+                }
                 if (Material_sample_mode(material, atlas, texCoord, hitTransparent, blockPos, biome, sample)) {
                     record->texCoord = texCoord;
                     record->normal = n;

@@ -35,6 +35,16 @@ public class ClPackedResourcePalette<T extends Packer> implements ResourcePalett
         return build().get();
     }
 
+    /** Number of packed ints in this palette. */
+    public int size() {
+        return palette.size();
+    }
+
+    /** Read a packed int from this palette. */
+    public int getData(int index) {
+        return palette.getInt(index);
+    }
+
     @Override
     public void close() {
         buffer.close();

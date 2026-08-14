@@ -91,6 +91,8 @@ typedef struct {
     Atmosphere atmosphere;
     int drawDepth;
     bool emittersEnabled;
+    bool profile;
+    __global int* profileCounters;
 } Scene;
 
 bool closestIntersect(Scene self, image2d_array_t atlas, Ray ray, IntersectionRecord* record, MaterialSample* sample, Material* mat);

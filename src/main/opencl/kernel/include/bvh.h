@@ -8,14 +8,22 @@
 typedef struct {
     __global const int* bvh;
     __global const int* trigs;
-    MaterialPalette* materialPalette;
+    bool profile;
+    __global int* profileCounters;
 } Bvh;
 
-Bvh Bvh_new(__global const int* bvh, __global const int* trigs, MaterialPalette* materialPalette) {
+static inline Bvh Bvh_profile(Bvh bvh, bool enabled, __global int* counters) {
+    bvh.profile = enabled;
+    bvh.profileCounters = counters;
+    return bvh;
+}
+
+Bvh Bvh_new(__global const int* bvh, __global const int* trigs) {
     Bvh b;
     b.bvh = bvh;
     b.trigs = trigs;
-    b.materialPalette = materialPalette;
+    b.profile = false;
+    b.profileCounters = (__global int*)0;
     return b;
 }
 

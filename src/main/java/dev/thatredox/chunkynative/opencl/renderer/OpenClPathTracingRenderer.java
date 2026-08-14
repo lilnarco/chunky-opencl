@@ -9,6 +9,7 @@ import dev.thatredox.chunkynative.opencl.renderer.kernel.KernelBindings;
 import dev.thatredox.chunkynative.opencl.renderer.kernel.PathTraceKernel;
 import dev.thatredox.chunkynative.opencl.renderer.kernel.SceneConstants;
 import dev.thatredox.chunkynative.opencl.renderer.scene.*;
+import dev.thatredox.chunkynative.opencl.ui.ChunkyClTab;
 import dev.thatredox.chunkynative.opencl.ui.OpenClRenderTimer;
 import org.jocl.*;
 
@@ -75,8 +76,16 @@ public class OpenClPathTracingRenderer implements Renderer {
                 camera.generate(renderLock, true);
                 kernel.setStaticArgs(new KernelBindings(camera, sceneLoader, gpu, SceneConstants.fromScene(scene)));
 
+                // Start the profile counters from a clean zeroed state.
+                if (ChunkyClTab.profileRender) {
+                    clEnqueueWriteBuffer(context.context.queue, gpu.getProfileCounters().get(), CL_TRUE, 0,
+                            (long) Sizeof.cl_int * 17, Pointer.to(new int[17]), 0, null, null);
+                }
+
                 int bufferSppReal = 0;
                 int logicalSpp = scene.spp;
+                long[] profileTotals = new long[17];
+                int[] lastProfileCounters = new int[17];
                 final int[] sceneSpp = {scene.spp};
                 long lastCallback = 0;
 
@@ -131,6 +140,12 @@ public class OpenClPathTracingRenderer implements Renderer {
                             stashGuides(context.context.queue, gpu, passBuffer.length);
                         }
 
+                        // Accumulate the kernel profile counters host-side (modular deltas
+                        // -> exact 64-bit totals even when the 32-bit GPU counters wrap).
+                        if (ChunkyClTab.profileRender) {
+                            accumulateProfile(context.context.queue, gpu, profileTotals, lastProfileCounters);
+                        }
+
                         int sampSpp = sceneSpp[0];
                         int passSpp = bufferSppReal;
                         double sinv = 1.0 / (sampSpp + passSpp);
@@ -152,6 +167,11 @@ public class OpenClPathTracingRenderer implements Renderer {
 
                 cameraGenTask.join();
                 bufferMergeTask.join();
+
+                // Kernel operation counter breakdown (Spark-style profiling).
+                if (ChunkyClTab.profileRender) {
+                    profileLog(profileTotals);
+                }
 
                 // End-of-render OIDN denoising: when the render completed (target spp
                 // reached) or was deliberately stopped (paused). Merges any remaining
@@ -186,6 +206,76 @@ public class OpenClPathTracingRenderer implements Renderer {
 
     private boolean isSaveEvent(SnapshotControl control, Scene scene, int spp) {
         return control.saveSnapshot(scene, spp) || control.saveRenderDump(scene, spp);
+    }
+
+    /**
+     * Read the kernel operation counters and accumulate the modular deltas host-side,
+     * producing exact 64-bit totals. The slot order must match the PROFILE_* defines
+     * in rt.h.
+     */
+    private static void accumulateProfile(cl_command_queue queue, GpuSceneResources gpu,
+                                          long[] totals, int[] last) {
+        int[] counters = new int[totals.length];
+        clEnqueueReadBuffer(queue, gpu.getProfileCounters().get(), CL_TRUE, 0,
+                (long) Sizeof.cl_int * counters.length, Pointer.to(counters), 0, null, null);
+        for (int i = 0; i < counters.length; i++) {
+            long delta = ((long) counters[i] - last[i]) & 0xFFFFFFFFL;
+            totals[i] += delta;
+            last[i] = counters[i];
+        }
+    }
+
+    /**
+     * Log the profiled operation breakdown, validating the counters' internal
+     * invariants (hits >= branch sum, emitter steps >= emitter rays, occluder hits
+     * within shadow-ray steps, lookups <= samples <= diffuse).
+     */
+    private static void profileLog(long[] totals) {
+        String[] names = {
+                "rays", "hits", "octree steps", "bvh node tests",
+                "diffuse bounces", "specular bounces", "refraction bounces",
+                "emitter grid lookups", "emitter samples", "emitter rays",
+                "emitter ray steps", "sun rays", "sun ray steps",
+                "occluder fast-path hits", "wave noise calls", "cloud steps",
+                "water plane tests"
+        };
+        StringBuilder sb = new StringBuilder("Profile: rays=").append(totals[0]);
+        for (int i = 1; i < totals.length; i++) {
+            sb.append(String.format(" | %s=%d (%.2f/ray)",
+                    names[i], totals[i], totals[0] > 0 ? (double) totals[i] / totals[0] : 0));
+        }
+        Log.warn(sb.toString());
+
+        long hits = totals[1];
+        long diffuse = totals[4];
+        long specular = totals[5];
+        long refraction = totals[6];
+        long lookups = totals[7];
+        long samples = totals[8];
+        long emitterRays = totals[9];
+        long emitterSteps = totals[10];
+        long sunSteps = totals[12];
+        long occluder = totals[13];
+        if (hits < diffuse + specular + refraction) {
+            Log.warn("Profile invariant violated: hits (" + hits + ") < branch sum ("
+                    + (diffuse + specular + refraction) + ")");
+        }
+        if (emitterSteps < emitterRays) {
+            Log.warn("Profile invariant violated: emitter ray steps (" + emitterSteps
+                    + ") < emitter rays (" + emitterRays + ")");
+        }
+        if (occluder > emitterSteps + sunSteps) {
+            Log.warn("Profile invariant violated: occluder fast-path hits (" + occluder
+                    + ") > shadow-ray steps (" + (emitterSteps + sunSteps) + ")");
+        }
+        if (lookups > samples) {
+            Log.warn("Profile invariant violated: emitter grid lookups (" + lookups
+                    + ") > emitter samples (" + samples + ")");
+        }
+        if (samples > diffuse) {
+            Log.warn("Profile invariant violated: emitter samples (" + samples
+                    + ") > diffuse bounces (" + diffuse + ")");
+        }
     }
 
     /**

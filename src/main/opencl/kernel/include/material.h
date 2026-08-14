@@ -143,6 +143,20 @@ bool Material_isWater(Material self) {
     return (self.flags & 0b100000) != 0;
 }
 
+// Opaque, non-emissive materials stop shadow rays immediately; their texels never need
+// to be sampled, so shadow rays can skip the texture read for them.
+bool Material_isOpaqueOccluder(Material self) {
+    return Material_isOpaque(self) && as_float(self.normal_emittance) <= EPS;
+}
+
+void MaterialSample_opaque(MaterialSample* sample) {
+    sample->color = (float4)(1.0f, 1.0f, 1.0f, 1.0f);
+    sample->emittance = 0.0f;
+    sample->specular = 0.0f;
+    sample->metalness = 0.0f;
+    sample->roughness = 0.0f;
+}
+
 float Material_ior(Material self) {
     return as_float(self.ior);
 }

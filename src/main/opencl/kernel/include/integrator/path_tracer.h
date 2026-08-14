@@ -2,6 +2,7 @@
 #include "camera.h"
 #include "material.h"
 #include "sky.h"
+#include "noise.h"
 
 // The albedo/normal auxiliary passes converge within a few dozen samples (their only
 // noise is edge anti-aliasing), so stop accumulating them after this many samples.
@@ -113,6 +114,8 @@ __kernel void render(
     float emitterIntensity,
     int emitterSamplingStrategy,
     int preventNormalEmitterWithSampling,
+    int profileEnabled,
+    __global int* profileCounters,
     __global float* albedoRes,
     __global float* normalRes,
     __global float* res
@@ -120,20 +123,28 @@ __kernel void render(
 ) {
     int gid = get_global_id(0);
 
-    float virtualDepth = sceneSettings[6];
+    float maxCoord = sceneSettings[6];
 
     Scene scene;
     scene.materialPalette = MaterialPalette_new(matPalette);
-    scene.octree = Octree_create(octreeData, *octreeDepth, (int)virtualDepth);
-    scene.waterOctree = Octree_create(waterOctreeData, *waterOctreeDepth, (int)virtualDepth);
-    scene.worldBvh = Bvh_new(worldBvhData, bvhTrigs, &scene.materialPalette);
-    scene.actorBvh = Bvh_new(actorBvhData, bvhTrigs, &scene.materialPalette);
-    scene.blockPalette = BlockPalette_new(bPalette, quadModels, aabbModels, waterModels, &scene.materialPalette);
+    scene.octree = Octree_create(octreeData, *octreeDepth, maxCoord);
+    scene.waterOctree = Octree_create(waterOctreeData, *waterOctreeDepth, maxCoord);
+    scene.worldBvh = Bvh_new(worldBvhData, bvhTrigs);
+    scene.actorBvh = Bvh_new(actorBvhData, bvhTrigs);
+    scene.blockPalette = BlockPalette_new(bPalette, quadModels, aabbModels, waterModels);
     scene.biome = BiomeColors_new(biomeMeta, biomeGrid, biomeGrass, biomeFoliage, biomeDryFoliage, biomeWater);
     scene.emitterGrid = EmitterGrid_new(emitterGridMeta, emitterGridCells, emitterGridIndexes, emitterGridEmitters);
     scene.atmosphere = Atmosphere_new(atmosphereSettings, cloudData);
     scene.drawDepth = 256;
     scene.emittersEnabled = emittersEnabled != 0;
+    scene.profile = profileEnabled != 0;
+    scene.profileCounters = profileCounters;
+    scene.octree = Octree_profile(scene.octree, scene.profile, profileCounters);
+    scene.waterOctree = Octree_profile(scene.waterOctree, scene.profile, profileCounters);
+    scene.worldBvh = Bvh_profile(scene.worldBvh, scene.profile, profileCounters);
+    scene.actorBvh = Bvh_profile(scene.actorBvh, scene.profile, profileCounters);
+    scene.atmosphere.profile = scene.profile;
+    scene.atmosphere.profileCounters = profileCounters;
 
     Sun sun = Sun_new(sunData);
 
@@ -145,10 +156,13 @@ __kernel void render(
     initialize_ray_medium(scene, &ray);
     ray.flags = 0;
 
+    Profile_inc(scene.profile, scene.profileCounters, PROFILE_TOTAL_RAYS);
+
     float3 color = (float3) (0.0);
     float3 throughput = (float3) (1.0);
     float traveled = 0.0f;
     float airDistance = 0.0f;
+    float waterDistance = 0.0f;
     float3 firstAlbedo = (float3) (0.0f);
     float3 firstNormal = (float3) (0.0f, 1.0f, 0.0f);
     float transmissivityCap = sceneSettings[0];
@@ -212,6 +226,8 @@ __kernel void render(
             ray.currentMaterial = record.material;
             ray.currentBlock = record.block;
 
+            Profile_inc(scene.profile, scene.profileCounters, PROFILE_TOTAL_HITS);
+
             Material currentMat = Material_get(scene.materialPalette, ray.currentMaterial);
             Material prevMat = Material_get(scene.materialPalette, ray.prevMaterial);
 
@@ -220,12 +236,32 @@ __kernel void render(
             if (ray.prevMaterial == 0 || Material_isWater(prevMat)) {
                 airDistance = traveled;
             }
+            // Underwater visibility: accumulate the distance traveled through water.
+            if (Material_isWater(prevMat)) {
+                waterDistance += record.distance;
+            }
+
+            // Water surface alpha is the scene's water opacity (CPU parity).
+            if (Material_isWater(currentMat) || Material_isWater(prevMat)) {
+                sample.color.w = scene.atmosphere.waterOpacity;
+            }
+
             float pSpecular = sample.specular;
             float pDiffuse = computeDiffuseProbability(sample.color, fancierTranslucency);
             float pAbsorb = computeAbsorption(sample.color, pDiffuse, fancierTranslucency);
             float n1 = Material_ior(prevMat);
             float n2 = Material_ior(currentMat);
             float3 hitPoint = ray.origin + ray.direction * record.distance;
+
+            // Animated water surface (Simplex shader): perturb the surface normal at
+            // water-air boundaries, like the CPU's SimplexWaterShader.
+            if (scene.atmosphere.waterShader == 1 &&
+                    (Material_isWater(currentMat) != Material_isWater(prevMat)) &&
+                    fabs(record.normal.y) > 0.1f) {
+                record.normal = SimplexWaterNormal(hitPoint.x, hitPoint.z, scene.atmosphere.animationTime);
+                Profile_inc(scene.profile, scene.profileCounters, PROFILE_WAVE_NOISE_CALLS);
+            }
+
             if (sample.color.w + pSpecular < EPS && fabs(n1 - n2) < EPS) {
                 ray.origin = hitPoint + ray.direction * OFFSET;
                 continue;
@@ -238,6 +274,7 @@ __kernel void render(
             float surfaceAlpha = sample.color.w;
             bool doMetal = sample.metalness > EPS && sample.metalness * surfaceAlpha > Random_nextFloat(random);
             if (doMetal) {
+                Profile_inc(scene.profile, scene.profileCounters, PROFILE_SPECULAR_BOUNCES);
                 throughput *= sample.color.xyz;
                 ray.origin = hitPoint;
                 ray.direction = _Material_specularReflection(record, sample, ray, random);
@@ -245,18 +282,21 @@ __kernel void render(
                 ray.currentMaterial = ray.prevMaterial;
                 ray.currentBlock = ray.prevBlock;
             } else if (pSpecular > EPS && pSpecular * surfaceAlpha > Random_nextFloat(random)) {
+                Profile_inc(scene.profile, scene.profileCounters, PROFILE_SPECULAR_BOUNCES);
                 ray.origin = hitPoint;
                 ray.direction = _Material_specularReflection(record, sample, ray, random);
                 ray.origin += ray.direction * OFFSET;
                 ray.currentMaterial = ray.prevMaterial;
                 ray.currentBlock = ray.prevBlock;
             } else if (Random_nextFloat(random) < pDiffuse) {
+                Profile_inc(scene.profile, scene.profileCounters, PROFILE_DIFFUSE_BOUNCES);
                 bool allowNormalEmitter = emittersEnabled != 0 &&
                         (!preventNormalEmitterWithSampling || effectiveEmitterSamplingStrategy == 0 || depth == 0);
                 if (allowNormalEmitter && sample.emittance > EPS) {
                     color += throughput * sample.color.xyz * sample.color.xyz * sample.emittance * emitterIntensity;
                 } else if (emittersEnabled != 0 &&
                         effectiveEmitterSamplingStrategy != 0 &&
+                        emitterIntensity > EPS &&
                         sample.emittance <= EPS) {
                     float3 emitterLight = sampleEmitters(
                             scene,
@@ -272,13 +312,14 @@ __kernel void render(
                     color += throughput * sample.color.xyz * emitterLight;
                 }
 
-                if (doSunSampling) {
+                if (doSunSampling && sun.intensity > EPS && sun.sw.y >= 0.0f) {
                     Ray sunRay = ray;
                     sunRay.origin = hitPoint;
                     sunRay.currentMaterial = ray.prevMaterial;
                     sunRay.currentBlock = ray.prevBlock;
                     sunRay.prevMaterial = ray.prevMaterial;
                     sunRay.prevBlock = ray.prevBlock;
+                    sunRay.flags = RAY_INDIRECT | RAY_OCCLUDER;
 
                     if (Sun_sampleDirection(sun, &sunRay, random)) {
                         float frontLight = dot(sunRay.direction, record.normal);
@@ -306,6 +347,7 @@ __kernel void render(
                 ray.currentBlock = ray.prevBlock;
                 didSpecularBounce = false;
             } else if (fabs(n1 - n2) >= EPS) {
+                Profile_inc(scene.profile, scene.profileCounters, PROFILE_REFRACTION_BOUNCES);
                 bool doRefraction = Material_isRefractive(currentMat) || Material_isRefractive(prevMat);
                 float n1n2 = n1 / n2;
                 float cosTheta = -dot(record.normal, ray.direction);
@@ -348,6 +390,12 @@ __kernel void render(
                 ray.flags |= RAY_INDIRECT;
             }
         } else {
+            // A ray that misses while traveling through water ends black instead of
+            // showing the sky (CPU parity — no sky underlay beneath the water world).
+            if (ray.currentMaterial != 0 &&
+                    Material_isWater(Material_get(scene.materialPalette, ray.currentMaterial))) {
+                break;
+            }
             intersectSky(skyTexture, sun, textureAtlas, scene.atmosphere, ray, &sample);
             if (depth == 0) {
                 firstAlbedo = sample.color.xyz;
@@ -371,6 +419,16 @@ __kernel void render(
         float3 hazeColor = scene.atmosphere.fogColor;
 
         color = mix(color, hazeColor, fogFactor);
+    }
+
+    // Underwater visibility attenuation (CPU parity): exp(-waterDistance / visibility),
+    // black when the visibility is zero.
+    if (waterDistance > 0.0f) {
+        if (scene.atmosphere.waterVisibility <= EPS) {
+            color *= 0.0f;
+        } else {
+            color *= exp(-waterDistance / scene.atmosphere.waterVisibility);
+        }
     }
 
     int spp = *bufferSpp;
@@ -437,16 +495,18 @@ __kernel void preview(
 
     Scene scene;
     scene.materialPalette = MaterialPalette_new(matPalette);
-    scene.octree = Octree_create(octreeData, *octreeDepth, 10);
-    scene.waterOctree = Octree_create(waterOctreeData, *waterOctreeDepth, 10);
-    scene.worldBvh = Bvh_new(worldBvhData, bvhTrigs, &scene.materialPalette);
-    scene.actorBvh = Bvh_new(actorBvhData, bvhTrigs, &scene.materialPalette);
-    scene.blockPalette = BlockPalette_new(bPalette, quadModels, aabbModels, waterModels, &scene.materialPalette);
+    scene.octree = Octree_create(octreeData, *octreeDepth, (float)(1 << max(*octreeDepth, 10)));
+    scene.waterOctree = Octree_create(waterOctreeData, *waterOctreeDepth, (float)(1 << max(*waterOctreeDepth, 10)));
+    scene.worldBvh = Bvh_new(worldBvhData, bvhTrigs);
+    scene.actorBvh = Bvh_new(actorBvhData, bvhTrigs);
+    scene.blockPalette = BlockPalette_new(bPalette, quadModels, aabbModels, waterModels);
     scene.biome = BiomeColors_new(biomeMeta, biomeGrid, biomeGrass, biomeFoliage, biomeDryFoliage, biomeWater);
     scene.emitterGrid = EmitterGrid_new(bPalette, bPalette, bPalette, bPalette);
     scene.atmosphere = Atmosphere_empty();
     scene.drawDepth = 256;
     scene.emittersEnabled = false;
+    scene.profile = false;
+    scene.profileCounters = (__global int*)0;
 
     Sun sun = Sun_new(sunData);
 
@@ -472,6 +532,8 @@ __kernel void preview(
 
         if (closestIntersect(scene, textureAtlas, ray, &record, &sample, &material)) {
             if (sample.color.w < 0.35f) {
+                ray.currentMaterial = record.material;
+                ray.currentBlock = record.block;
                 ray.origin += ray.direction * (record.distance + OFFSET);
                 continue;
             }
@@ -486,9 +548,15 @@ __kernel void preview(
     }
 
     if (!hitAnything) {
-        MaterialSample sample;
-        intersectSky(skyTexture, sun, textureAtlas, scene.atmosphere, ray, &sample);
-        color = sample.color.xyz;
+        // Underwater misses end black (no sky underlay beneath the water world).
+        if (ray.currentMaterial != 0 &&
+                Material_isWater(Material_get(scene.materialPalette, ray.currentMaterial))) {
+            color = (float3)(0.0f);
+        } else {
+            MaterialSample sample;
+            intersectSky(skyTexture, sun, textureAtlas, scene.atmosphere, ray, &sample);
+            color = sample.color.xyz;
+        }
     }
 
     color = sqrt(color);

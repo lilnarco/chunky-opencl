@@ -75,6 +75,8 @@ public class PathTraceKernel implements AutoCloseable {
         binder.setFloat(bindings.getSceneConstants().getEmitterIntensity());
         binder.setInt(bindings.getSceneConstants().getEmitterSamplingStrategy());
         binder.setInt(bindings.getSceneConstants().getPreventNormalEmitterWithSampling());
+        binder.setInt(bindings.getSceneConstants().getProfileRender());
+        binder.setMem(bindings.getGpu().getProfileCounters().get());
         binder.setMem(bindings.getGpu().getAlbedoBuffer().get());
         binder.setMem(bindings.getGpu().getNormalBuffer().get());
         binder.setMem(bindings.getGpu().getBuffer().get());

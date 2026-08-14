@@ -23,6 +23,15 @@ typedef struct {
     float3 cloudOffset;
     int3 origin;              // octree origin, used to convert to world coordinates
     __global const int* cloudData;
+    float waterVisibility;    // underwater light attenuation distance
+    bool waterPlaneEnabled;
+    float waterPlaneY;        // octree coordinates
+    int waterShader;          // 0 = still, 1 = simplex, 2 = legacy (treated as simplex)
+    float animationTime;
+    int waterMaterial;        // material palette index of water
+    float waterOpacity;       // water surface alpha (CPU parity, default 0.42)
+    bool profile;
+    __global int* profileCounters;
 } Atmosphere;
 
 Atmosphere Atmosphere_new(__global const float* settings, __global const int* cloudData) {
@@ -37,6 +46,15 @@ Atmosphere Atmosphere_new(__global const float* settings, __global const int* cl
     a.cloudOffset = (float3)(settings[9], settings[10], settings[11]);
     a.origin = (int3)((int)settings[12], (int)settings[13], (int)settings[14]);
     a.cloudData = cloudData;
+    a.waterVisibility = settings[15];
+    a.waterPlaneEnabled = settings[16] > 0.5f;
+    a.waterPlaneY = settings[17] - (float)a.origin.y;
+    a.waterShader = (int)settings[18];
+    a.animationTime = settings[19];
+    a.waterMaterial = as_int(settings[20]);
+    a.waterOpacity = settings[21];
+    a.profile = false;
+    a.profileCounters = (__global int*)0;
     return a;
 }
 
@@ -52,6 +70,15 @@ Atmosphere Atmosphere_empty() {
     a.cloudOffset = (float3)(0.0f, 0.0f, 0.0f);
     a.origin = (int3)(0, 0, 0);
     a.cloudData = (__global const int*)0;
+    a.waterVisibility = 1.0f;
+    a.waterPlaneEnabled = false;
+    a.waterPlaneY = 0.0f;
+    a.waterShader = 0;
+    a.animationTime = 0.0f;
+    a.waterMaterial = 0;
+    a.waterOpacity = 1.0f;
+    a.profile = false;
+    a.profileCounters = (__global int*)0;
     return a;
 }
 
@@ -155,6 +182,7 @@ bool Cloud_intersect(Atmosphere self, Ray ray, IntersectionRecord* record, Mater
         float xrem = (float)xmod * (ix + xo - xp);
         float zlimit = xrem * m;
         while (t < tExit) {
+            Profile_inc(self.profile, self.profileCounters, PROFILE_CLOUD_STEPS);
             float zrem = (float)zmod * (iz + zo - zp);
             if (zrem < zlimit) {
                 iz += zmod;
@@ -198,6 +226,7 @@ bool Cloud_intersect(Atmosphere self, Ray ray, IntersectionRecord* record, Mater
         float zrem = (float)zmod * (iz + zo - zp);
         float xlimit = zrem * m;
         while (t < tExit) {
+            Profile_inc(self.profile, self.profileCounters, PROFILE_CLOUD_STEPS);
             float xrem = (float)xmod * (ix + xo - xp);
             if (xrem < xlimit) {
                 ix += xmod;

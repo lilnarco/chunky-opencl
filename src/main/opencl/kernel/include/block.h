@@ -16,16 +16,14 @@ typedef struct {
     __global const int* quadModels;
     __global const int* aabbModels;
     __global const int* waterModels;
-    MaterialPalette* materialPalette;
 } BlockPalette;
 
-BlockPalette BlockPalette_new(__global const int* blockPalette, __global const int* quadModels, __global const int* aabbModels, __global const int* waterModels, MaterialPalette* materialPalette) {
+BlockPalette BlockPalette_new(__global const int* blockPalette, __global const int* quadModels, __global const int* aabbModels, __global const int* waterModels) {
     BlockPalette p;
     p.blockPalette = blockPalette;
     p.quadModels = quadModels;
     p.aabbModels = aabbModels;
     p.waterModels = waterModels;
-    p.materialPalette = materialPalette;
     return p;
 }
 
@@ -416,6 +414,14 @@ bool BlockPalette_intersectNormalizedBlock(BlockPalette self, image2d_array_t at
                 }
 
                 Material material = Material_get(materialPalette, tempRecord.material);
+                if ((ray.flags & RAY_OCCLUDER) && Material_isOpaqueOccluder(material)) {
+                    // Shadow ray through an opaque non-emissive block: the texel never
+                    // needs to be sampled (the ray stops here anyway).
+                    MaterialSample_opaque(sample);
+                    tempRecord.block = block;
+                    *record = tempRecord;
+                    return true;
+                }
                 hit = Material_sample_mode(material, atlas, tempRecord.texCoord, true, blockPosition, biome, sample);
                 if (hit) {
                     if (insideBlock && Material_isRefractive(material) && !Material_isOpaque(material) &&

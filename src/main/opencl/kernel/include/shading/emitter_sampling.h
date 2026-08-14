@@ -40,11 +40,13 @@ float3 sampleEmitterFace(
     shadowRay.currentMaterial = 0;
     shadowRay.prevBlock = 0;
     shadowRay.currentBlock = 0;
-    shadowRay.flags = RAY_INDIRECT;
+    shadowRay.flags = RAY_INDIRECT | RAY_OCCLUDER;
 
     float traveled = OFFSET;
     float3 attenuation = (float3)(1.0f, 1.0f, 1.0f);
+    Profile_inc(scene.profile, scene.profileCounters, PROFILE_EMITTER_RAYS);
     while (traveled < distance) {
+        Profile_inc(scene.profile, scene.profileCounters, PROFILE_EMITTER_RAY_STEPS);
         IntersectionRecord record = IntersectionRecord_new();
         MaterialSample sample;
         Material material;
@@ -64,6 +66,14 @@ float3 sampleEmitterFace(
             e *= emitterIntensity;
             e *= faceScaler;
             return attenuation * sample.color.xyz * e;
+        }
+
+        // Water surface alpha is the scene's water opacity (CPU parity).
+        if (Material_isWater(material)) {
+            sample.color.w = scene.atmosphere.waterOpacity;
+        }
+        if (Material_isOpaque(material)) {
+            Profile_inc(scene.profile, scene.profileCounters, PROFILE_OCCLUDER_FAST_PATH_HITS);
         }
 
         float3 transmittance = Material_translucentTransmission(
@@ -107,11 +117,13 @@ float3 sampleEmitters(
         float transmissivityCap,
         Random random
 ) {
+    Profile_inc(scene.profile, scene.profileCounters, PROFILE_EMITTER_SAMPLES);
     int start;
     int count;
     if (!EmitterGrid_cellRange(scene.emitterGrid, intFloorFloat3(hitPoint), &start, &count) || count <= 0) {
         return (float3)(0.0f);
     }
+    Profile_inc(scene.profile, scene.profileCounters, PROFILE_EMITTER_GRID_LOOKUPS);
 
     float3 result = (float3)(0.0f);
     switch (strategy) {
@@ -125,6 +137,13 @@ float3 sampleEmitters(
             int4 emitter = EmitterGrid_getEmitter(scene.emitterGrid, emitterIndex);
             int faceCount = BlockPalette_emitterFaceCount(scene.blockPalette, emitter.w);
             if (faceCount <= 0) {
+                return (float3)(0.0f);
+            }
+            // Fast reject: if the emitter's block center is behind the surface plane,
+            // every face is too.
+            float3 toCenter = convert_float3((int3)(emitter.x, emitter.y, emitter.z)) +
+                    (float3)(0.5f, 0.5f, 0.5f) - hitPoint;
+            if (dot(toCenter, shadingNormal) <= 0.0f) {
                 return (float3)(0.0f);
             }
             if (strategy == 1) {
@@ -148,6 +167,11 @@ float3 sampleEmitters(
                 int4 emitter = EmitterGrid_getEmitter(scene.emitterGrid, emitterIndex);
                 int faceCount = BlockPalette_emitterFaceCount(scene.blockPalette, emitter.w);
                 if (faceCount <= 0) {
+                    continue;
+                }
+                float3 toCenter = convert_float3((int3)(emitter.x, emitter.y, emitter.z)) +
+                        (float3)(0.5f, 0.5f, 0.5f) - hitPoint;
+                if (dot(toCenter, shadingNormal) <= 0.0f) {
                     continue;
                 }
                 float faceScaler = emitterScaler / (float) faceCount;

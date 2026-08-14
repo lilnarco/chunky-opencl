@@ -8,8 +8,10 @@ float4 getDirectLightAttenuation(
         bool strictDirectLight
 ) {
     float4 attenuation = (float4) (1.0f, 1.0f, 1.0f, 1.0f);
+    Profile_inc(scene.profile, scene.profileCounters, PROFILE_SUN_RAYS);
 
     while (attenuation.w > 0.0f) {
+        Profile_inc(scene.profile, scene.profileCounters, PROFILE_SUN_RAY_STEPS);
         ray.origin += ray.direction * OFFSET;
 
         IntersectionRecord record = IntersectionRecord_new();
@@ -24,6 +26,14 @@ float4 getDirectLightAttenuation(
         ray.prevBlock = ray.currentBlock;
         ray.currentMaterial = record.material;
         ray.currentBlock = record.block;
+
+        // Water surface alpha is the scene's water opacity (CPU parity).
+        if (Material_isWater(material)) {
+            sample.color.w = scene.atmosphere.waterOpacity;
+        }
+        if (Material_isOpaque(material)) {
+            Profile_inc(scene.profile, scene.profileCounters, PROFILE_OCCLUDER_FAST_PATH_HITS);
+        }
 
         float mult = 1.0f - sample.color.w;
         attenuation.x *= sample.color.x * sample.color.w + mult;

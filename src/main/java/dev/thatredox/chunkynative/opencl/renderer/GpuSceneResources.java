@@ -3,12 +3,14 @@ package dev.thatredox.chunkynative.opencl.renderer;
 import static org.jocl.CL.*;
 
 import dev.thatredox.chunkynative.opencl.context.ClContext;
+import dev.thatredox.chunkynative.opencl.context.ContextManager;
 import dev.thatredox.chunkynative.opencl.ui.ChunkyClTab;
 import dev.thatredox.chunkynative.opencl.util.ClIntBuffer;
 import dev.thatredox.chunkynative.opencl.util.ClMemory;
 import dev.thatredox.chunkynative.util.Reflection;
 import org.jocl.Pointer;
 import org.jocl.Sizeof;
+import se.llbit.chunky.renderer.WaterShadingStrategy;
 import se.llbit.chunky.renderer.scene.Scene;
 
 import java.lang.reflect.Field;
@@ -25,6 +27,7 @@ public class GpuSceneResources implements AutoCloseable {
     private final ClMemory sceneSettings;
     private final ClMemory atmosphereSettings;
     private final ClIntBuffer cloudData;
+    private final ClMemory profileCounters;
 
     public GpuSceneResources(ClContext context, Scene scene, float[] passBuffer) {
         this.context = context;
@@ -46,6 +49,15 @@ public class GpuSceneResources implements AutoCloseable {
         }, context);
         this.rayDepth = new ClIntBuffer(scene.getRayDepth(), context);
 
+        // Maximum coordinate magnitude for the octree march's dynamic offset: the larger
+        // of the octree extent and the camera's distance from the origin, with a safety
+        // margin so float precision stays safe at large coordinates.
+        double octreeExtent = Math.pow(2, scene.getWorldOctree().getDepth());
+        double camX = scene.camera().getPosition().x - scene.getOrigin().x;
+        double camY = scene.camera().getPosition().y - scene.getOrigin().y;
+        double camZ = scene.camera().getPosition().z - scene.getOrigin().z;
+        float maxCoord = (float) (Math.max(octreeExtent, Math.sqrt(camX * camX + camY * camY + camZ * camZ)) * 1.5);
+
         this.sceneSettings = new ClMemory(
                 clCreateBuffer(context.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                         (long) Sizeof.cl_float * 7,
@@ -56,18 +68,24 @@ public class GpuSceneResources implements AutoCloseable {
                                 scene.getSunSamplingStrategy().isSunLuminosity() ? 1.0f : 0.0f,
                                 scene.getSunSamplingStrategy().isStrictDirectLight() ? 1.0f : 0.0f,
                                 ChunkyClTab.russianRouletteThreshold,
-                                (float) ChunkyClTab.virtualDepth
+                                maxCoord
                         }), null));
 
-        // Fog + cloud settings. Layout (floats):
+        // Fog + cloud + water settings. Layout (floats):
         // 0: fog mode (0 = NONE, 1 = UNIFORM, 2 = LAYERED)
         // 1-3: fog color
         // 4: uniform density, 5: sky fog density, 6: fast fog
         // 7: clouds enabled, 8: cloud size, 9-11: cloud offset
         // 12-14: octree origin
+        // 15: water visibility, 16: water plane enabled, 17: water plane height (world)
+        // 18: water shader (0 = still, 1 = simplex), 19: animation time
+        // 20: water material palette id (float bits)
+        // 21: water opacity
+        WaterShadingStrategy waterShader = scene.getWaterShadingStrategy();
+        int waterShaderId = waterShader == WaterShadingStrategy.STILL ? 0 : 1;
         this.atmosphereSettings = new ClMemory(
                 clCreateBuffer(context.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                        (long) Sizeof.cl_float * 15,
+                        (long) Sizeof.cl_float * 22,
                         Pointer.to(new float[] {
                                 scene.fog.getFogMode().ordinal(),
                                 (float) scene.fog.getFogColor().x,
@@ -83,8 +101,21 @@ public class GpuSceneResources implements AutoCloseable {
                                 (float) scene.sky().cloudZOffset(),
                                 scene.getOrigin().x,
                                 scene.getOrigin().y,
-                                scene.getOrigin().z
+                                scene.getOrigin().z,
+                                (float) scene.getWaterVisibility(),
+                                scene.isWaterPlaneEnabled() ? 1.0f : 0.0f,
+                                (float) scene.getEffectiveWaterPlaneHeight(),
+                                waterShaderId,
+                                (float) scene.getAnimationTime(),
+                                Float.intBitsToFloat(ContextManager.get().sceneLoader.getWaterMaterialId()),
+                                (float) scene.getWaterOpacity()
                         }), null));
+
+        // Kernel operation counters: the kernel atomically writes these, so the buffer
+        // must be READ_WRITE (ClIntBuffer creates READ_ONLY buffers).
+        this.profileCounters = new ClMemory(
+                clCreateBuffer(context.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                        (long) Sizeof.cl_int * 17, Pointer.to(new int[17]), null));
 
         this.cloudData = new ClIntBuffer(exportCloudData(), context);
     }
@@ -153,8 +184,13 @@ public class GpuSceneResources implements AutoCloseable {
         return cloudData;
     }
 
+    public ClMemory getProfileCounters() {
+        return profileCounters;
+    }
+
     @Override
     public void close() {
+        profileCounters.close();
         cloudData.close();
         atmosphereSettings.close();
         sceneSettings.close();
