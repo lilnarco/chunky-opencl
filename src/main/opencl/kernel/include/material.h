@@ -164,12 +164,14 @@ float Material_ior(Material self) {
 float3 _Material_diffuseReflection(IntersectionRecord record, Random random) {
     float x1 = Random_nextFloat(random);
     float x2 = Random_nextFloat(random);
-    float r = sqrt(x1);
+    // Stage 2: natives — uniform hemisphere map; small radial/angular error
+    // averages out over SPP.
+    float r = native_sqrt(x1);
     float theta = 2 * M_PI_F * x2;
 
-    float tx = r * cos(theta);
-    float ty = r * sin(theta);
-    float tz = sqrt(1 - x1);
+    float tx = r * native_cos(theta);
+    float ty = r * native_sin(theta);
+    float tz = native_sqrt(1 - x1);
 
     // Transform from tangent space to world space
     float xx, xy, xz;
@@ -189,7 +191,8 @@ float3 _Material_diffuseReflection(IntersectionRecord record, Random random) {
     uy = xz * record.normal.x - xx * record.normal.z;
     uz = xx * record.normal.y - xy * record.normal.x;
 
-    r = 1 / sqrt(ux*ux + uy*uy + uz*uz);
+    // Stage 2: native_rsqrt — textbook reciprocal normalize.
+    r = native_rsqrt(ux*ux + uy*uy + uz*uz);
 
     ux *= r;
     uy *= r;
@@ -220,7 +223,9 @@ float3 _Material_specularReflection(IntersectionRecord record, MaterialSample sa
         direction += factor * record.normal;
     }
 
-    return normalize(direction);
+    // Stage 2: fast normalize idiom — input is already ~unit (reflection of a
+    // unit vector plus a small roughness perturb).
+    return direction * native_rsqrt(dot(direction, direction));
 }
 
 float3 Material_refractDirection(IntersectionRecord record, Ray ray, float n1, float n2) {

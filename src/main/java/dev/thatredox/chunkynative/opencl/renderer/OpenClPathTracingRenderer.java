@@ -3,8 +3,10 @@ package dev.thatredox.chunkynative.opencl.renderer;
 import static org.jocl.CL.*;
 
 import dev.thatredox.chunkynative.opencl.context.ContextManager;
+import dev.thatredox.chunkynative.opencl.context.ClContext;
 import dev.thatredox.chunkynative.opencl.renderer.ClSceneLoader;
 import dev.thatredox.chunkynative.opencl.renderer.kernel.DispatchParams;
+import dev.thatredox.chunkynative.opencl.renderer.kernel.KernelDefines;
 import dev.thatredox.chunkynative.opencl.renderer.kernel.KernelBindings;
 import dev.thatredox.chunkynative.opencl.renderer.kernel.PathTraceKernel;
 import dev.thatredox.chunkynative.opencl.renderer.kernel.SceneConstants;
@@ -31,6 +33,29 @@ import java.util.function.BooleanSupplier;
 public class OpenClPathTracingRenderer implements Renderer {
 
     private BooleanSupplier postRender = () -> true;
+
+    // Number of kernel operation counters; must match PROFILE_COUNT in rt.h.
+    private static final int PROFILE_COUNT = 18;
+
+    // Phase 1 spp-batching: samples traced per kernel launch when the profiler is
+    // off. Disabled under the profiler because one batched launch would overflow
+    // the 32-bit GPU counters mid-launch (2M px x 32 x 314 descents >> 2^32).
+    private static final int SPP_PER_BATCH = 32;
+
+    // Optional explicit OpenCL work-group size, e.g.
+    // -DchunkyClWorkGroupSize=128. Null (default) leaves the choice to the driver.
+    private static final long[] WORK_GROUP_SIZE = workGroupSize();
+
+    private static long[] workGroupSize() {
+        String v = System.getProperty("chunkyClWorkGroupSize");
+        if (v == null) return null;
+        try {
+            long n = Long.parseLong(v);
+            return n > 0 ? new long[] { n } : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
 
     @Override
     public String getId() {
@@ -68,9 +93,17 @@ public class OpenClPathTracingRenderer implements Renderer {
             // Ensure the scene is loaded
             sceneLoader.ensureLoad(manager.bufferedScene);
 
+            // Stage 1 JIT: program specialized to this scene's feature set (cached
+            // per define-set; first new set pays one compile). Stamped for the
+            // tab's lap timer (render vs compile).
+            long buildStart = System.nanoTime();
+            org.jocl.cl_program renderProgram =
+                    context.renderer.kernelFor(KernelDefines.forScene(scene, sceneLoader));
+            OpenClRenderTimer.addCompileNanos(System.nanoTime() - buildStart);
+
             try (ClCamera camera = new ClCamera(scene, context.context);
                  GpuSceneResources gpu = new GpuSceneResources(context.context, scene, passBuffer);
-                 PathTraceKernel kernel = new PathTraceKernel(context.renderer.kernel, context.context.queue)) {
+                 PathTraceKernel kernel = new PathTraceKernel(renderProgram, context.context.queue)) {
                 RenderScheduler scheduler = new RenderScheduler(context.context.queue);
                 // Generate initial camera rays
                 camera.generate(renderLock, true);
@@ -79,15 +112,18 @@ public class OpenClPathTracingRenderer implements Renderer {
                 // Start the profile counters from a clean zeroed state.
                 if (ChunkyClTab.profileRender) {
                     clEnqueueWriteBuffer(context.context.queue, gpu.getProfileCounters().get(), CL_TRUE, 0,
-                            (long) Sizeof.cl_int * 17, Pointer.to(new int[17]), 0, null, null);
+                            (long) Sizeof.cl_int * PROFILE_COUNT, Pointer.to(new int[PROFILE_COUNT]), 0, null, null);
                 }
 
                 int bufferSppReal = 0;
                 int logicalSpp = scene.spp;
-                long[] profileTotals = new long[17];
-                int[] lastProfileCounters = new int[17];
+                long[] profileTotals = new long[PROFILE_COUNT];
+                int[] lastProfileCounters = new int[PROFILE_COUNT];
                 final int[] sceneSpp = {scene.spp};
                 long lastCallback = 0;
+                // M4: accumulated device-side kernel nanoseconds (profiling queue only).
+                long kernelNanosTotal = 0;
+                int launchCount = 0;
 
                 Random rand = new Random(0);
 
@@ -98,12 +134,33 @@ public class OpenClPathTracingRenderer implements Renderer {
                 // waiting for the OpenCL renderer to complete.
                 while (logicalSpp < scene.getTargetSpp()) {
                     renderLock.lock();
-                    kernel.setPerDispatchArgs(new DispatchParams(rand.nextInt(), bufferSppReal));
-                    cl_event renderEvent = kernel.dispatch(passBuffer.length / 3, null, null);
+                    // Batch up to SPP_PER_BATCH samples per launch; the kernel
+                    // averages them in registers. Remainder/exact-target safe, and
+                    // overshoot-tolerant like the old +1 path (the drain handles it).
+                    int batch = ChunkyClTab.profileRender ? 1
+                            : Math.max(1, Math.min(SPP_PER_BATCH, scene.getTargetSpp() - scene.spp));
+                    kernel.setPerDispatchArgs(new DispatchParams(rand.nextInt(), bufferSppReal, batch));
+                    cl_event renderEvent = kernel.dispatch(passBuffer.length / 3, WORK_GROUP_SIZE,
+                            kernel.getWriteEvents());
+                    if (ClContext.QUEUE_PROFILING) {
+                        // Read before scheduler.waitFor releases the event; the extra
+                        // wait is free since the dispatch already completed.
+                        clWaitForEvents(1, new cl_event[] { renderEvent });
+                        kernelNanosTotal += PathTraceKernel.eventNanos(renderEvent);
+                    }
                     scheduler.waitFor(renderEvent);
                     renderLock.unlock();
-                    bufferSppReal += 1;
-                    scene.spp += 1;
+                    launchCount++;
+                    bufferSppReal += batch;
+                    scene.spp += batch;
+
+                    // Accumulate the kernel profile counters every frame. The loop already
+                    // blocks on each dispatch, so this read adds no latency to the render;
+                    // per-frame deltas stay far below the 32-bit wrap limit, so the
+                    // modular-delta math is always exact.
+                    if (ChunkyClTab.profileRender) {
+                        accumulateProfile(context.context.queue, gpu, profileTotals, lastProfileCounters);
+                    }
 
                     if (camera.needGenerate && cameraGenTask.isDone()) {
                         cameraGenTask = Chunky.getCommonThreads().submit(() -> camera.generate(renderLock, true));
@@ -136,14 +193,8 @@ public class OpenClPathTracingRenderer implements Renderer {
 
                         // Stash the current albedo/normal guides so "Denoise now" can work
                         // even when the GPU render is not active.
-                        if (OidnDenoiser.enabled || OidnDenoiser.lastAlbedo == null) {
+                        if (gpu.hasGuides() && (OidnDenoiser.enabled || OidnDenoiser.lastAlbedo == null)) {
                             stashGuides(context.context.queue, gpu, passBuffer.length);
-                        }
-
-                        // Accumulate the kernel profile counters host-side (modular deltas
-                        // -> exact 64-bit totals even when the 32-bit GPU counters wrap).
-                        if (ChunkyClTab.profileRender) {
-                            accumulateProfile(context.context.queue, gpu, profileTotals, lastProfileCounters);
                         }
 
                         int sampSpp = sceneSpp[0];
@@ -173,6 +224,16 @@ public class OpenClPathTracingRenderer implements Renderer {
                     profileLog(profileTotals);
                 }
 
+                // M4 kernel-vs-host split (needs -DchunkyClProfiling=1 at startup).
+                if (ClContext.QUEUE_PROFILING) {
+                    double wallMs = OpenClRenderTimer.getElapsedMillis();
+                    Log.info(String.format(
+                            "OpenCL kernel time: %.2f s of %.2f s wall (%.1f%% in kernel, %d launches)",
+                            kernelNanosTotal / 1e9, wallMs / 1e3,
+                            100.0 * kernelNanosTotal / 1e6 / Math.max(1.0, wallMs),
+                            launchCount));
+                }
+
                 // End-of-render OIDN denoising: when the render completed (target spp
                 // reached) or was deliberately stopped (paused). Merges any remaining
                 // frames so the denoiser sees the complete image, then displays the
@@ -193,7 +254,9 @@ public class OpenClPathTracingRenderer implements Renderer {
                         bufferSppReal = 0;
                     }
                     // Fresh guides straight from the GPU.
-                    stashGuides(context.context.queue, gpu, passBuffer.length);
+                    if (gpu.hasGuides()) {
+                        stashGuides(context.context.queue, gpu, passBuffer.length);
+                    }
                     denoiseFrame(manager.context.getSceneDirectory(), scene, sampleBuffer,
                             scene.canvasConfig.getWidth(), scene.canvasConfig.getHeight());
                 }
@@ -209,9 +272,11 @@ public class OpenClPathTracingRenderer implements Renderer {
     }
 
     /**
-     * Read the kernel operation counters and accumulate the modular deltas host-side,
-     * producing exact 64-bit totals. The slot order must match the PROFILE_* defines
-     * in rt.h.
+     * Read the kernel operation counters and accumulate the deltas host-side into
+     * exact 64-bit totals. Called once per rendered frame, so the 32-bit GPU counters
+     * wrap many times over a long render but the per-frame delta can never approach
+     * 2^32 (max ~25M rays/frame at 5K) — the modular delta is therefore always exact.
+     * The slot order must match the PROFILE_* defines in rt.h.
      */
     private static void accumulateProfile(cl_command_queue queue, GpuSceneResources gpu,
                                           long[] totals, int[] last) {
@@ -219,7 +284,7 @@ public class OpenClPathTracingRenderer implements Renderer {
         clEnqueueReadBuffer(queue, gpu.getProfileCounters().get(), CL_TRUE, 0,
                 (long) Sizeof.cl_int * counters.length, Pointer.to(counters), 0, null, null);
         for (int i = 0; i < counters.length; i++) {
-            long delta = ((long) counters[i] - last[i]) & 0xFFFFFFFFL;
+            long delta = (counters[i] - last[i]) & 0xFFFFFFFFL;
             totals[i] += delta;
             last[i] = counters[i];
         }
@@ -237,7 +302,7 @@ public class OpenClPathTracingRenderer implements Renderer {
                 "emitter grid lookups", "emitter samples", "emitter rays",
                 "emitter ray steps", "sun rays", "sun ray steps",
                 "occluder fast-path hits", "wave noise calls", "cloud steps",
-                "water plane tests"
+                "water plane tests", "octree descent steps"
         };
         StringBuilder sb = new StringBuilder("Profile: rays=").append(totals[0]);
         for (int i = 1; i < totals.length; i++) {
@@ -245,6 +310,14 @@ public class OpenClPathTracingRenderer implements Renderer {
                     names[i], totals[i], totals[0] > 0 ? (double) totals[i] / totals[0] : 0));
         }
         Log.warn(sb.toString());
+
+        // Descent depth metric: average tree levels walked per octree step. A value
+        // near the octree depth means the per-step root walk is long and the bitmask
+        // fast-empty-skip experiment is worth it; a value near 1-3 means it is not.
+        if (totals[2] > 0) {
+            Log.warn(String.format("Profile descent depth: %d levels / %d octree steps = %.2f levels per step",
+                    totals[17], totals[2], (double) totals[17] / totals[2]));
+        }
 
         long hits = totals[1];
         long diffuse = totals[4];

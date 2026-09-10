@@ -2,6 +2,7 @@ package dev.thatredox.chunkynative.opencl.renderer;
 
 import dev.thatredox.chunkynative.opencl.context.ContextManager;
 import dev.thatredox.chunkynative.opencl.renderer.ClSceneLoader;
+import dev.thatredox.chunkynative.opencl.renderer.kernel.KernelDefines;
 import dev.thatredox.chunkynative.opencl.renderer.scene.*;
 import dev.thatredox.chunkynative.opencl.util.ClIntBuffer;
 import dev.thatredox.chunkynative.opencl.util.ClMemory;
@@ -53,8 +54,10 @@ public class OpenClPreviewRenderer implements Renderer {
         // Ensure the scene is loaded
         sceneLoader.ensureLoad(manager.bufferedScene);
 
-        // Load the kernel
-        cl_kernel kernel = clCreateKernel(context.renderer.kernel, "preview", null);
+        // Load the kernel: same scene-specialized program as the main renderer,
+        // so a session builds one program instead of two.
+        cl_kernel kernel = clCreateKernel(
+                context.renderer.kernelFor(KernelDefines.forScene(scene, sceneLoader)), "preview", null);
 
         ClCamera camera = new ClCamera(scene, context.context);
         ClMemory buffer = new ClMemory(clCreateBuffer(context.context.context, CL_MEM_WRITE_ONLY,

@@ -28,11 +28,13 @@ public class ChunkyClTab implements RenderControlsTab {
     protected final VBox box;
     private Scene scene;
     private final Label renderTimeLabel;
+    private final Label buildLabel;
     private final Timeline renderTimeTicker;
 
-    // 靜態變數供渲染器存取
     public static float russianRouletteThreshold = 50.0f;
     public static boolean profileRender = false;
+    // Water shader override: null = scene default, 0 = still, 1 = simplex.
+    public static Integer waterShaderOverrideId = null;
 
     public ChunkyClTab(Scene scene) {
         this.scene = scene;
@@ -41,8 +43,10 @@ public class ChunkyClTab implements RenderControlsTab {
         box.setPadding(new Insets(10.0));
 
         renderTimeLabel = new Label();
+        buildLabel = new Label();
         updateRenderTimeLabel();
         box.getChildren().add(renderTimeLabel);
+        box.getChildren().add(buildLabel);
 
         // Russian Roulette UI
         Label rrLabel = new Label("Russian Roulette Threshold: 50%");
@@ -54,6 +58,20 @@ public class ChunkyClTab implements RenderControlsTab {
             scene.softRefresh();
         });
         box.getChildren().addAll(rrLabel, rrSlider);
+
+        // Water shader selector: overrides the scene's water shader (Still/Simplex).
+        Label waterShaderLabel = new Label("Water shader:");
+        javafx.scene.control.ComboBox<String> waterShaderCombo = new javafx.scene.control.ComboBox<>();
+        waterShaderCombo.getItems().addAll("Scene default", "Still", "Simplex");
+        waterShaderCombo.getSelectionModel().select(
+                waterShaderOverrideId == null ? 0 : waterShaderOverrideId + 1);
+        waterShaderCombo.valueProperty().addListener((obs, oldVal, newVal) -> {
+            int index = waterShaderCombo.getSelectionModel().getSelectedIndex();
+            waterShaderOverrideId = index <= 0 ? null : index - 1;
+            scene.softRefresh();
+        });
+        HBox waterShaderRow = new HBox(10.0, waterShaderLabel, waterShaderCombo);
+        box.getChildren().add(waterShaderRow);
 
         // Kernel profiling UI
         CheckBox profileCheck = new CheckBox("Profile render (kernel operation counters)");
@@ -160,9 +178,25 @@ public class ChunkyClTab implements RenderControlsTab {
     }
 
     private void updateRenderTimeLabel() {
+        // A blocking kernel build (JIT specialization or first launch) shows here so
+        // 0 SPP during a ~1 min compile doesn't look frozen. Set on the render
+        // thread, read here on the FX ticker thread.
+        String compiling = ContextManager.Renderer.compileStatus;
+        if (compiling != null) {
+            renderTimeLabel.setText(compiling);
+            return;
+        }
         long millis = OpenClRenderTimer.getElapsedMillis();
         double seconds = millis / 1000.0;
+        double compileSeconds = OpenClRenderTimer.getCompileMillis() / 1000.0;
         String suffix = OpenClRenderTimer.isRunning() ? " (running)" : "";
-        renderTimeLabel.setText(String.format("Render Time: %.1f s%s", seconds, suffix));
+        renderTimeLabel.setText(String.format("Render Time: %.1f s (compile %.1f s)%s",
+                seconds, compileSeconds, suffix));
+        // Null-guard: the constructor's first update call predates nothing now, but
+        // the ticker can race tab teardown — never let the label die over a status.
+        if (buildLabel != null) {
+            String outcome = ContextManager.Renderer.lastBuildOutcome;
+            buildLabel.setText(outcome != null ? outcome : "");
+        }
     }
 }

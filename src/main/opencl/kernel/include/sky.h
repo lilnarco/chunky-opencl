@@ -78,25 +78,31 @@ bool Sun_intersect(Sun self, image2d_array_t atlas, Ray ray, MaterialSample* sam
     return false;
 }
 
+// cos(0.03f): sun cone radius (0.03 rad), loop-invariant — precomputed so the
+// per-bounce sampler doesn't recompute it.
+#define SUN_CONE_COS 0.99955f
+
 bool Sun_sampleDirection(Sun self, Ray* ray, Random random) {
     // Sun illumination is independent of the "draw sun" toggle (which only controls the
     // disk sprite), matching the CPU renderer. A sun below the horizon produces no light
     // anyway because the shadow ray hits the ground.
-    float radius_cos = cos(0.03f);
+    float radius_cos = SUN_CONE_COS;
 
     float x1 = Random_nextFloat(random);
     float x2 = Random_nextFloat(random);
 
     float cos_a = 1 - x1 + x1 * radius_cos;
-    float sin_a = sqrt(1 - cos_a * cos_a);
+    // Stage 2: natives — uniform cone sampling, angular error far below the
+    // 0.03 rad cone radius.
+    float sin_a = native_sqrt(1 - cos_a * cos_a);
     float phi = 2 * M_PI_F * x2;
 
-    float3 u = self.su * (cos(phi) * sin_a);
-    float3 v = self.sv * (sin(phi) * sin_a);
+    float3 u = self.su * (native_cos(phi) * sin_a);
+    float3 v = self.sv * (native_sin(phi) * sin_a);
     float3 w = self.sw * cos_a;
 
     ray->direction = u + v + w;
-    ray->direction = normalize(ray->direction);
+    ray->direction *= native_rsqrt(dot(ray->direction, ray->direction));
 
     return true;
 }

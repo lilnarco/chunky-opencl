@@ -11,9 +11,11 @@ import dev.thatredox.chunkynative.util.Reflection;
 import org.jocl.Pointer;
 import org.jocl.Sizeof;
 import se.llbit.chunky.renderer.WaterShadingStrategy;
+import se.llbit.chunky.renderer.scene.FogLayer;
 import se.llbit.chunky.renderer.scene.Scene;
 
 import java.lang.reflect.Field;
+import java.util.List;
 
 public class GpuSceneResources implements AutoCloseable {
     private final ClContext context;
@@ -28,17 +30,22 @@ public class GpuSceneResources implements AutoCloseable {
     private final ClMemory atmosphereSettings;
     private final ClIntBuffer cloudData;
     private final ClMemory profileCounters;
+    private final boolean guidesEnabled;
 
     public GpuSceneResources(ClContext context, Scene scene, float[] passBuffer) {
         this.context = context;
 
         this.buffer = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
                 (long) Sizeof.cl_float * passBuffer.length, Pointer.to(passBuffer), null));
-        // Auxiliary render passes (albedo/normal), used by the pass modes and OIDN denoising.
+        // Auxiliary render passes (albedo/normal), used by the OIDN denoiser. When the
+        // denoiser is off these are 1-float dummies (the kernel never writes them), which
+        // saves 2x full-res VRAM (600 MB at 5K).
+        int guideLength = OidnDenoiser.enabled ? passBuffer.length : 1;
+        this.guidesEnabled = OidnDenoiser.enabled;
         this.albedoBuffer = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                (long) Sizeof.cl_float * passBuffer.length, Pointer.to(passBuffer), null));
+                (long) Sizeof.cl_float * guideLength, Pointer.to(new float[guideLength]), null));
         this.normalBuffer = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                (long) Sizeof.cl_float * passBuffer.length, Pointer.to(passBuffer), null));
+                (long) Sizeof.cl_float * guideLength, Pointer.to(new float[guideLength]), null));
         this.randomSeed = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_ONLY, Sizeof.cl_int, null, null));
         this.bufferSpp = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_ONLY, Sizeof.cl_int, null, null));
 
@@ -81,41 +88,61 @@ public class GpuSceneResources implements AutoCloseable {
         // 18: water shader (0 = still, 1 = simplex), 19: animation time
         // 20: water material palette id (float bits)
         // 21: water opacity
-        WaterShadingStrategy waterShader = scene.getWaterShadingStrategy();
-        int waterShaderId = waterShader == WaterShadingStrategy.STILL ? 0 : 1;
+        // 22: water octree non-empty (gates the water octree march)
+        // 23: layered fog layer count
+        // 24 + 3i: (yWithOrigin, breadthInv, density) per fog layer
+        int waterShaderId;
+        if (ChunkyClTab.waterShaderOverrideId != null) {
+            waterShaderId = ChunkyClTab.waterShaderOverrideId == 0 ? 0 : 1;
+        } else {
+            WaterShadingStrategy waterShader = scene.getWaterShadingStrategy();
+            waterShaderId = waterShader == WaterShadingStrategy.STILL ? 0 : 1;
+        }
+        List<FogLayer> fogLayers = scene.fog.getFogLayers();
+        float[] atmosphereSettingsArray = new float[24 + fogLayers.size() * 3];
+        atmosphereSettingsArray[0] = scene.fog.getFogMode().ordinal();
+        atmosphereSettingsArray[1] = (float) scene.fog.getFogColor().x;
+        atmosphereSettingsArray[2] = (float) scene.fog.getFogColor().y;
+        atmosphereSettingsArray[3] = (float) scene.fog.getFogColor().z;
+        atmosphereSettingsArray[4] = (float) scene.fog.getUniformDensity();
+        atmosphereSettingsArray[5] = (float) scene.fog.getSkyFogDensity();
+        atmosphereSettingsArray[6] = scene.fog.fastFog() ? 1.0f : 0.0f;
+        atmosphereSettingsArray[7] = scene.sky().cloudsEnabled() ? 1.0f : 0.0f;
+        atmosphereSettingsArray[8] = (float) scene.sky().cloudSize();
+        atmosphereSettingsArray[9] = (float) scene.sky().cloudXOffset();
+        atmosphereSettingsArray[10] = (float) scene.sky().cloudYOffset();
+        atmosphereSettingsArray[11] = (float) scene.sky().cloudZOffset();
+        atmosphereSettingsArray[12] = scene.getOrigin().x;
+        atmosphereSettingsArray[13] = scene.getOrigin().y;
+        atmosphereSettingsArray[14] = scene.getOrigin().z;
+        atmosphereSettingsArray[15] = (float) scene.getWaterVisibility();
+        atmosphereSettingsArray[16] = scene.isWaterPlaneEnabled() ? 1.0f : 0.0f;
+        atmosphereSettingsArray[17] = (float) scene.getEffectiveWaterPlaneHeight();
+        atmosphereSettingsArray[18] = waterShaderId;
+        atmosphereSettingsArray[19] = (float) scene.getAnimationTime();
+        atmosphereSettingsArray[20] = Float.intBitsToFloat(ContextManager.get().sceneLoader.getWaterMaterialId());
+        atmosphereSettingsArray[21] = (float) scene.getWaterOpacity();
+        atmosphereSettingsArray[22] = ContextManager.get().sceneLoader.hasWater() ? 1.0f : 0.0f;
+        atmosphereSettingsArray[23] = fogLayers.size();
+        for (int i = 0; i < fogLayers.size(); i++) {
+            FogLayer layer = fogLayers.get(i);
+            atmosphereSettingsArray[24 + i * 3] = (float) layer.yWithOrigin;
+            atmosphereSettingsArray[24 + i * 3 + 1] = (float) layer.breadthInv;
+            atmosphereSettingsArray[24 + i * 3 + 2] = (float) layer.density;
+        }
         this.atmosphereSettings = new ClMemory(
                 clCreateBuffer(context.context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                        (long) Sizeof.cl_float * 22,
-                        Pointer.to(new float[] {
-                                scene.fog.getFogMode().ordinal(),
-                                (float) scene.fog.getFogColor().x,
-                                (float) scene.fog.getFogColor().y,
-                                (float) scene.fog.getFogColor().z,
-                                (float) scene.fog.getUniformDensity(),
-                                (float) scene.fog.getSkyFogDensity(),
-                                scene.fog.fastFog() ? 1.0f : 0.0f,
-                                scene.sky().cloudsEnabled() ? 1.0f : 0.0f,
-                                (float) scene.sky().cloudSize(),
-                                (float) scene.sky().cloudXOffset(),
-                                (float) scene.sky().cloudYOffset(),
-                                (float) scene.sky().cloudZOffset(),
-                                scene.getOrigin().x,
-                                scene.getOrigin().y,
-                                scene.getOrigin().z,
-                                (float) scene.getWaterVisibility(),
-                                scene.isWaterPlaneEnabled() ? 1.0f : 0.0f,
-                                (float) scene.getEffectiveWaterPlaneHeight(),
-                                waterShaderId,
-                                (float) scene.getAnimationTime(),
-                                Float.intBitsToFloat(ContextManager.get().sceneLoader.getWaterMaterialId()),
-                                (float) scene.getWaterOpacity()
-                        }), null));
+                        (long) Sizeof.cl_float * atmosphereSettingsArray.length,
+                        Pointer.to(atmosphereSettingsArray), null));
 
         // Kernel operation counters: the kernel atomically writes these, so the buffer
         // must be READ_WRITE (ClIntBuffer creates READ_ONLY buffers).
+        // 18 slots must match PROFILE_COUNT in rt.h. The counters are 32-bit; the host
+        // accumulates them after every frame, so per-frame deltas stay far below the
+        // wrap limit even at 5K resolutions.
         this.profileCounters = new ClMemory(
                 clCreateBuffer(context.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                        (long) Sizeof.cl_int * 17, Pointer.to(new int[17]), null));
+                        (long) Sizeof.cl_int * 18, Pointer.to(new int[18]), null));
 
         this.cloudData = new ClIntBuffer(exportCloudData(), context);
     }
@@ -154,6 +181,11 @@ public class GpuSceneResources implements AutoCloseable {
 
     public ClMemory getNormalBuffer() {
         return normalBuffer;
+    }
+
+    /** Whether the albedo/normal guides were allocated (OIDN enabled at render start). */
+    public boolean hasGuides() {
+        return guidesEnabled;
     }
 
     public ClMemory getRandomSeed() {

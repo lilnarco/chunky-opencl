@@ -105,6 +105,12 @@ public class ClSceneLoader extends AbstractSceneLoader {
         return waterMaterialId;
     }
 
+    /** Whether any water blocks exist in the loaded scene (water palette non-empty). */
+    public boolean hasWater() {
+        return waterPalette instanceof ClPackedResourcePalette
+                && ((ClPackedResourcePalette<?>) waterPalette).size() > 0;
+    }
+
     private void loadEmitterGrid(Scene scene) {
         Grid grid = scene.getEmitterGrid();
         // The grid only changes when the world/palette changes, not on camera moves or

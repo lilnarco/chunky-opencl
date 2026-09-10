@@ -43,8 +43,9 @@ Octree Octree_create(__global const int* treeData, int depth, float maxCoord) {
     octree.dynamicOffset = Ray_dynamicOffset(maxCoord);
     octree.profile = false;
     octree.profileCounters = (__global int*)0;
-    // 重要：碰撞邊界必須使用真實深度 (depth)，
-    // 這樣 AABB_quick_intersect 才能將平行射線正確推送到實體方塊區域，解決 Y-Clip 精度遺失問題。
+    // The collision bounds must use the real depth, so AABB_quick_intersect pushes
+    // parallel rays into the solid block region (fixes the parallel-projection
+    // Y-clip precision loss).
     octree.bounds = AABB_new(0, 1<<depth, 0, 1<<depth, 0, 1<<depth);
     return octree;
 }
@@ -52,7 +53,6 @@ Octree Octree_create(__global const int* treeData, int depth, float maxCoord) {
 int Octree_get(Octree* self, int x, int y, int z) {
     int3 bp = (int3) (x, y, z);
 
-    // 1. 檢查是否在實體數據範圍內 (depth)
     int3 rlv = bp >> self->depth;
     if ((rlv.x != 0) | (rlv.y != 0) | (rlv.z != 0))
         return 0;

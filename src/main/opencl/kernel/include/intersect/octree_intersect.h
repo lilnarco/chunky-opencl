@@ -4,7 +4,8 @@ bool Octree_octreeIntersect(Octree self, image2d_array_t atlas, BlockPalette pal
     float distMarch = 0;
 
     float3 invD = 1 / ray.direction;
-    // 使用虛擬深度的最大值來計算 Offset，確保在大範圍下不會因為浮點數精度導致射線停滯。
+    // March offset from the host-computed dynamic offset (max coordinate magnitude),
+    // keeping rays moving at large ranges despite float precision.
     float rayOffset = self.dynamicOffset;
     float3 offsetD = ray.direction * rayOffset;
 
@@ -46,6 +47,8 @@ bool Octree_octreeIntersect(Octree self, image2d_array_t atlas, BlockPalette pal
             lv = 1 & (bp >> level);
             data = self.treeData[data + ((lv.x << 2) | (lv.y << 1) | lv.z)];
         }
+        // Descent depth metric: one atomic per step instead of one per level.
+        Profile_add(self.profile, self.profileCounters, PROFILE_OCTREE_DESCENT_STEPS, depth - level);
         data = -data;
         lv = bp >> level;
 

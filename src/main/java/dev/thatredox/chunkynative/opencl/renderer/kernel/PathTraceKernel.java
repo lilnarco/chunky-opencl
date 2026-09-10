@@ -10,14 +10,27 @@ import org.jocl.cl_event;
 import org.jocl.cl_kernel;
 import org.jocl.cl_program;
 
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+
 public class PathTraceKernel implements AutoCloseable {
     private final cl_kernel kernel;
     private final cl_command_queue queue;
     private final KernelArgBinder binder;
     private ClMemory randomSeed;
     private ClMemory bufferSpp;
-    private final int[] seedValue = new int[1];
-    private final int[] sppValue = new int[1];
+    // Direct buffers: JOCL rejects heap arrays for non-blocking writes.
+    private final ByteBuffer seedValue = ByteBuffer.allocateDirect(Sizeof.cl_int).order(ByteOrder.nativeOrder());
+    private final ByteBuffer sppValue = ByteBuffer.allocateDirect(Sizeof.cl_int).order(ByteOrder.nativeOrder());
+    private final int[] batchValue = new int[1];
+    // Kernel arg index of the trailing sppPerBatch int, captured at the end of
+    // setStaticArgs so per-dispatch updates can't drift from the signature order.
+    private int batchArgIndex = -1;
+    // Pending async per-dispatch writes, released once the next dispatch is
+    // enqueued (the host always waits on the render event first, so by then the
+    // writes are long complete) or when the kernel is closed.
+    private cl_event pendingSeedWrite;
+    private cl_event pendingSppWrite;
 
     public PathTraceKernel(cl_program program, cl_command_queue queue) {
         this.kernel = clCreateKernel(program, "render", null);
@@ -77,18 +90,42 @@ public class PathTraceKernel implements AutoCloseable {
         binder.setInt(bindings.getSceneConstants().getPreventNormalEmitterWithSampling());
         binder.setInt(bindings.getSceneConstants().getProfileRender());
         binder.setMem(bindings.getGpu().getProfileCounters().get());
+        binder.setInt(bindings.getSceneConstants().getGuidesEnabled());
         binder.setMem(bindings.getGpu().getAlbedoBuffer().get());
         binder.setMem(bindings.getGpu().getNormalBuffer().get());
         binder.setMem(bindings.getGpu().getBuffer().get());
+        batchArgIndex = binder.getArgIndex();
     }
 
     public void setPerDispatchArgs(DispatchParams params) {
-        seedValue[0] = params.getRngSeed();
-        sppValue[0] = params.getBufferSpp();
-        clEnqueueWriteBuffer(queue, randomSeed.get(), CL_TRUE, 0, Sizeof.cl_int,
-                Pointer.to(seedValue), 0, null, null);
-        clEnqueueWriteBuffer(queue, bufferSpp.get(), CL_TRUE, 0, Sizeof.cl_int,
-                Pointer.to(sppValue), 0, null, null);
+        releasePendingWrites();
+        seedValue.putInt(0, params.getRngSeed());
+        sppValue.putInt(0, params.getBufferSpp());
+        // Async: the queue is in-order so kernel-after-writes is already guaranteed;
+        // the event chain keeps it correct if that ever changes, and removes two
+        // pipeline drains per launch.
+        pendingSeedWrite = new cl_event();
+        pendingSppWrite = new cl_event();
+        clEnqueueWriteBuffer(queue, randomSeed.get(), CL_FALSE, 0, Sizeof.cl_int,
+                Pointer.to(seedValue), 0, null, pendingSeedWrite);
+        clEnqueueWriteBuffer(queue, bufferSpp.get(), CL_FALSE, 0, Sizeof.cl_int,
+                Pointer.to(sppValue), 0, null, pendingSppWrite);
+        batchValue[0] = params.getSppPerBatch();
+        clSetKernelArg(kernel, batchArgIndex, Sizeof.cl_int, Pointer.to(batchValue));
+    }
+
+    /** Wait-list for the next dispatch: both async writes must land first. */
+    public cl_event[] getWriteEvents() {
+        return new cl_event[] { pendingSeedWrite, pendingSppWrite };
+    }
+
+    private void releasePendingWrites() {
+        if (pendingSeedWrite != null) {
+            clReleaseEvent(pendingSeedWrite);
+            clReleaseEvent(pendingSppWrite);
+            pendingSeedWrite = null;
+            pendingSppWrite = null;
+        }
     }
 
     public cl_event dispatch(long globalSize, long[] localSize, cl_event[] waitEvents) {
@@ -98,12 +135,27 @@ public class PathTraceKernel implements AutoCloseable {
         return event;
     }
 
+    /**
+     * Elapsed device nanoseconds for a completed event. Only valid with a
+     * profiling queue (-DchunkyClProfiling=1); call after completion, before
+     * the event is released.
+     */
+    public static long eventNanos(cl_event event) {
+        long[] start = new long[1];
+        long[] end = new long[1];
+        long[] sizeRet = new long[1];
+        clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_START, Sizeof.cl_ulong, Pointer.to(start), sizeRet);
+        clGetEventProfilingInfo(event, CL_PROFILING_COMMAND_END, Sizeof.cl_ulong, Pointer.to(end), sizeRet);
+        return end[0] - start[0];
+    }
+
     public cl_kernel getKernel() {
         return kernel;
     }
 
     @Override
     public void close() {
+        releasePendingWrites();
         clReleaseKernel(kernel);
     }
 }

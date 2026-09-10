@@ -60,6 +60,7 @@ void intersectSky(image2d_t skyTexture, Sun sun, image2d_array_t atlas, Atmosphe
     Sun_intersect(sun, atlas, ray, sample);
 
     // Uniform fog: blend the sky color toward the fog color, strongest at the horizon.
+#if FOG_MODE == 1
     if (atmosphere.fogMode == 1 && atmosphere.uniformDensity > 0.0f) {
         float fog;
         if (ray.direction.y > 0.0f) {
@@ -72,4 +73,14 @@ void intersectSky(image2d_t skyTexture, Sun sun, image2d_array_t atlas, Atmosphe
         fog = clamp(fog, 0.0f, 1.0f);
         sample->color.xyz = mix(sample->color.xyz, atmosphere.fogColor, fog);
     }
+#endif
+
+    // Layered sky fog (CPU Fog.addSkyFog for LAYERED): logistic-CDF extinction over
+    // the ray's y-span out to FOG_LIMIT, with the fully-sunlit inscatter approximation.
+#if FOG_MODE == 2
+    if (atmosphere.fogMode == 2) {
+        float y2 = ray.origin.y + ray.direction.y * FOG_LIMIT;
+        sample->color.xyz = Fog_applyLayered(atmosphere, ray.direction.y, ray.origin.y, y2, sample->color.xyz);
+    }
+#endif
 }

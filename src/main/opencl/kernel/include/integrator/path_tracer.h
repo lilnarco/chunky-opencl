@@ -116,9 +116,11 @@ __kernel void render(
     int preventNormalEmitterWithSampling,
     int profileEnabled,
     __global int* profileCounters,
+    int guidesEnabled,
     __global float* albedoRes,
     __global float* normalRes,
-    __global float* res
+    __global float* res,
+    int sppPerBatch
 
 ) {
     int gid = get_global_id(0);
@@ -148,7 +150,20 @@ __kernel void render(
 
     Sun sun = Sun_new(sunData);
 
-    unsigned int randomState = *randomSeed + gid;
+    // Phase 1 spp-batching: trace sppPerBatch samples per launch in registers and
+    // average once, instead of one launch per sample. RNG streams differ from the
+    // one-launch-per-sample era (the seed now mixes gid, batch size and batch
+    // index), so noise patterns change but convergence is statistically identical.
+    // Profiling stays exact because batching is disabled while the profiler runs
+    // (a batched launch would overflow the 32-bit counters mid-launch).
+    int spp = *bufferSpp;
+    int batchCount = sppPerBatch < 1 ? 1 : sppPerBatch;
+    float3 batchSum = (float3) (0.0);
+    float3 guideAlbedoSum = (float3) (0.0);
+    float3 guideNormalSum = (float3) (0.0);
+    int guideCount = 0;
+    for (int batch = 0; batch < batchCount; batch++) {
+    unsigned int randomState = *randomSeed + (unsigned int) gid * (unsigned int) batchCount + (unsigned int) batch;
     Random random = &randomState;
     Random_nextState(random);
     Ray ray = ray_to_camera(projectorType, cameraSettings, canvasConfig, gid, random);
@@ -160,30 +175,41 @@ __kernel void render(
 
     float3 color = (float3) (0.0);
     float3 throughput = (float3) (1.0);
+#if FOG_MODE == 1 || FOG_MODE == 2
     float traveled = 0.0f;
     float airDistance = 0.0f;
+#endif
+#ifdef HAS_WATER
     float waterDistance = 0.0f;
+#endif
+    // Layered fog y-span start: the path origin's y (CPU's ox, the recursion entry
+    // point - not reset by bounces so the fog integrates the whole path).
+#if FOG_MODE == 2
+    float fogStartY = ray.origin.y;
+#endif
     float3 firstAlbedo = (float3) (0.0f);
     float3 firstNormal = (float3) (0.0f, 1.0f, 0.0f);
     float transmissivityCap = sceneSettings[0];
     bool fancierTranslucency = sceneSettings[1] > 0.5f;
+#ifdef HAS_SUN
     bool doSunSampling = sceneSettings[2] > 0.5f;
     bool sunLuminosity = sceneSettings[3] > 0.5f;
     bool strictDirectLight = sceneSettings[4] > 0.5f;
-    float rrThreshold = sceneSettings[5] / 100.0f; // 俄羅斯輪盤閾值 (0.0 ~ 1.0)
+#endif
+    float rrThreshold = sceneSettings[5] / 100.0f; // Russian Roulette threshold (0.0 ~ 1.0)
     // NONE (0) means no emitter-grid sampling, exactly like the CPU renderer.
     int effectiveEmitterSamplingStrategy = emitterSamplingStrategy;
 
     for (int depth = 0; depth < *rayDepth; depth++) {
-        // 實作俄羅斯輪盤 (Russian Roulette)
-        // 在前 3 跳之後，如果路徑能量過低，則機率性終止，以提升 GPU 效率。
+        // Russian Roulette: after the first 3 bounces, probabilistically terminate
+        // low-energy paths to save GPU work.
         if (depth > 2) {
             float p = fmax(throughput.x, fmax(throughput.y, throughput.z));
             if (p < rrThreshold) {
                 if (Random_nextFloat(random) > p) {
                     break;
                 }
-                throughput /= p; // 能量補償，保持渲染無偏
+                throughput /= p; // Energy compensation, keeps the render unbiased
             }
         }
 
@@ -192,12 +218,16 @@ __kernel void render(
         Material material;
 
         if (closestIntersect(scene, textureAtlas, ray, &record, &sample, &material)) {
+#if FOG_MODE == 1 || FOG_MODE == 2
             traveled += record.distance;
+#endif
 
             // Capture the first *visible* surface's albedo and world-space normal for the
             // auxiliary render passes (and OIDN denoising). March past semi-transparent
             // texels (alpha < 0.5) so the passes show the object behind leaves/glass.
-            if (depth == 0) {
+            // The guides converge within GUIDE_SPP_CAP samples and their write is gated
+            // below, so the march itself is dead work once the cap is reached.
+            if (guidesEnabled != 0 && depth == 0 && (spp + batch) < GUIDE_SPP_CAP) {
                 Ray auxRay = ray;
                 IntersectionRecord auxRecord = record;
                 MaterialSample auxSample = sample;
@@ -233,13 +263,17 @@ __kernel void render(
 
             // Track the distance traveled through air (or water) for uniform fog, like
             // the CPU's `if (prevMat == Air || prevMat.isWater()) airDistance = ray.distance`.
+#if FOG_MODE == 1 || FOG_MODE == 2
             if (ray.prevMaterial == 0 || Material_isWater(prevMat)) {
                 airDistance = traveled;
             }
+#endif
             // Underwater visibility: accumulate the distance traveled through water.
+#ifdef HAS_WATER
             if (Material_isWater(prevMat)) {
                 waterDistance += record.distance;
             }
+#endif
 
             // Water surface alpha is the scene's water opacity (CPU parity).
             if (Material_isWater(currentMat) || Material_isWater(prevMat)) {
@@ -255,12 +289,14 @@ __kernel void render(
 
             // Animated water surface (Simplex shader): perturb the surface normal at
             // water-air boundaries, like the CPU's SimplexWaterShader.
+#ifdef HAS_WATER
             if (scene.atmosphere.waterShader == 1 &&
                     (Material_isWater(currentMat) != Material_isWater(prevMat)) &&
                     fabs(record.normal.y) > 0.1f) {
                 record.normal = SimplexWaterNormal(hitPoint.x, hitPoint.z, scene.atmosphere.animationTime);
                 Profile_inc(scene.profile, scene.profileCounters, PROFILE_WAVE_NOISE_CALLS);
             }
+#endif
 
             if (sample.color.w + pSpecular < EPS && fabs(n1 - n2) < EPS) {
                 ray.origin = hitPoint + ray.direction * OFFSET;
@@ -294,7 +330,9 @@ __kernel void render(
                         (!preventNormalEmitterWithSampling || effectiveEmitterSamplingStrategy == 0 || depth == 0);
                 if (allowNormalEmitter && sample.emittance > EPS) {
                     color += throughput * sample.color.xyz * sample.color.xyz * sample.emittance * emitterIntensity;
-                } else if (emittersEnabled != 0 &&
+                }
+#ifdef HAS_EMITTERS
+                else if (emittersEnabled != 0 &&
                         effectiveEmitterSamplingStrategy != 0 &&
                         emitterIntensity > EPS &&
                         sample.emittance <= EPS) {
@@ -311,7 +349,9 @@ __kernel void render(
                     );
                     color += throughput * sample.color.xyz * emitterLight;
                 }
+#endif
 
+#ifdef HAS_SUN
                 if (doSunSampling && sun.intensity > EPS && sun.sw.y >= 0.0f) {
                     Ray sunRay = ray;
                     sunRay.origin = hitPoint;
@@ -338,6 +378,7 @@ __kernel void render(
                         }
                     }
                 }
+#endif
 
                 throughput *= sample.color.xyz;
                 ray.origin = hitPoint;
@@ -392,10 +433,12 @@ __kernel void render(
         } else {
             // A ray that misses while traveling through water ends black instead of
             // showing the sky (CPU parity — no sky underlay beneath the water world).
+#ifdef HAS_WATER
             if (ray.currentMaterial != 0 &&
                     Material_isWater(Material_get(scene.materialPalette, ray.currentMaterial))) {
                 break;
             }
+#endif
             intersectSky(skyTexture, sun, textureAtlas, scene.atmosphere, ray, &sample);
             if (depth == 0) {
                 firstAlbedo = sample.color.xyz;
@@ -409,9 +452,11 @@ __kernel void render(
     // Uniform ground fog: distance-based blend toward the sky-tinted haze color.
     // Sun-independent so the fog never darkens when the sun is occluded, and identical
     // to the CPU's extinction+inscatter result when the sun is fully visible.
+#if FOG_MODE == 1
     if (scene.atmosphere.fogMode == 1 && airDistance > 0.0f) {
         float fogDensity = scene.atmosphere.uniformDensity * FOG_EXTINCTION_FACTOR;
-        float fogFactor = 1.0f - exp(-airDistance * fogDensity);
+        // Stage 2: native_exp — fogFactor feeds an 8-bit mix, error invisible.
+        float fogFactor = 1.0f - native_exp(-airDistance * fogDensity);
         fogFactor = clamp(fogFactor, 0.0f, 1.0f);
 
         // Flat fog color (CPU parity): a sky-tinted haze makes far objects converge
@@ -420,29 +465,49 @@ __kernel void render(
 
         color = mix(color, hazeColor, fogFactor);
     }
+#endif
+
+    // Layered ground fog (CPU Fog.addGroundFog for LAYERED): logistic-CDF extinction
+    // over the path's y-span, with the same fully-sunlit inscatter approximation as
+    // the uniform fog above.
+#if FOG_MODE == 2
+    if (scene.atmosphere.fogMode == 2 && airDistance > 0.0f) {
+        color = Fog_applyLayered(scene.atmosphere, ray.direction.y, fogStartY, ray.origin.y, color);
+    }
+#endif
 
     // Underwater visibility attenuation (CPU parity): exp(-waterDistance / visibility),
     // black when the visibility is zero.
+#ifdef HAS_WATER
     if (waterDistance > 0.0f) {
         if (scene.atmosphere.waterVisibility <= EPS) {
             color *= 0.0f;
         } else {
-            color *= exp(-waterDistance / scene.atmosphere.waterVisibility);
+            // Stage 2: native_exp — multiplicative attenuation, converges.
+            color *= native_exp(-waterDistance / scene.atmosphere.waterVisibility);
         }
     }
+#endif
 
-    int spp = *bufferSpp;
+    batchSum += color;
+    if (guidesEnabled != 0 && (spp + batch) < GUIDE_SPP_CAP) {
+        guideAlbedoSum += firstAlbedo;
+        guideNormalSum += firstNormal;
+        guideCount++;
+    }
+    } // end spp batch loop
+
     float3 bufferColor = vload3(gid, res);
-    bufferColor = (bufferColor * spp + color) / (spp + 1);
+    bufferColor = (bufferColor * spp + batchSum) / (spp + batchCount);
     vstore3(bufferColor, gid, res);
 
     // The albedo/normal guides only carry edge anti-aliasing noise, so they converge
     // within GUIDE_SPP_CAP samples. Freeze them there — they are OIDN inputs only.
-    if (spp < GUIDE_SPP_CAP) {
+    if (guidesEnabled != 0 && guideCount > 0) {
         float3 albedoColor = vload3(gid, albedoRes);
         float3 normalColor = vload3(gid, normalRes);
-        albedoColor = (albedoColor * spp + firstAlbedo) / (spp + 1);
-        normalColor = (normalColor * spp + firstNormal) / (spp + 1);
+        albedoColor = (albedoColor * spp + guideAlbedoSum) / (spp + guideCount);
+        normalColor = (normalColor * spp + guideNormalSum) / (spp + guideCount);
         vstore3(albedoColor, gid, albedoRes);
         vstore3(normalColor, gid, normalRes);
     }
