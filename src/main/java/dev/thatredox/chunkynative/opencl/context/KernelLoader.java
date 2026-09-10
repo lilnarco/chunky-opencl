@@ -58,12 +58,26 @@ public class KernelLoader {
      * @return OpenCL program.
      */
     public static cl_program loadProgram(ClContext context, String base, String kernelName) {
+        return loadProgram(context, base, kernelName, "");
+    }
+
+    /**
+     * Load an OpenCL program with extra compiler options (Stage 1 JIT
+     * specialization, e.g. {@code "-DFOG_MODE=0 -DHAS_EMITTERS=1"}).
+     *
+     * @param context       OpenCL context.
+     * @param base          Kernel base directory name.
+     * @param kernelName    Kernel entrypoint filename.
+     * @param options       Extra options appended to the base compile flags.
+     * @return OpenCL program.
+     */
+    public static cl_program loadProgram(ClContext context, String base, String kernelName, String options) {
         return context.loadProgram(file -> {
             String program = instance.rawSourceReader.apply(base, file);
             Matcher matcher = openclIncludeMatcher.matcher(program);
             program = matcher.replaceFirst("// #include \"../opencl.h\"");
             return program;
-        }, kernelName);
+        }, kernelName, options);
     }
 
     public static boolean canHotReload() {

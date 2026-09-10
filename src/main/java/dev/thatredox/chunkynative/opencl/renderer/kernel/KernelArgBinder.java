@@ -22,6 +22,11 @@ public class KernelArgBinder {
         this.argIndex = 0;
     }
 
+    /** Index the next setMem/setInt/setFloat call will bind (for per-dispatch args). */
+    public int getArgIndex() {
+        return argIndex;
+    }
+
     public void setMem(cl_mem mem) {
         clSetKernelArg(kernel, argIndex++, Sizeof.cl_mem, Pointer.to(mem));
     }

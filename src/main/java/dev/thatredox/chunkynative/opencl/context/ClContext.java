@@ -16,6 +16,11 @@ public class ClContext {
     public final cl_command_queue queue;
     public final cl_device_id[] deviceArray;
 
+    // M4 measurement gate: -DchunkyClProfiling=1 creates the queue with
+    // CL_QUEUE_PROFILING_ENABLE so per-launch kernel time can be split out of
+    // wall-clock. Default path is flag-free, exactly as before.
+    public static final boolean QUEUE_PROFILING = Boolean.getBoolean("chunkyClProfiling");
+
     public ClContext(Device device) {
         this.device = device;
         this.deviceArray = new cl_device_id[] { device.device };
@@ -28,9 +33,12 @@ public class ClContext {
         int[] version = device.version();
         if (version[0] >= 2) {
             cl_queue_properties queueProperties = new cl_queue_properties();
+            if (QUEUE_PROFILING) {
+                queueProperties.addProperty(CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE);
+            }
             queue = clCreateCommandQueueWithProperties(context, device.device, queueProperties, null);
         } else {
-            queue = createCommandQueueOld(0);
+            queue = createCommandQueueOld(QUEUE_PROFILING ? CL_QUEUE_PROFILING_ENABLE : 0);
         }
 
         // Check if version is behind
@@ -52,6 +60,19 @@ public class ClContext {
      * @return OpenCL program.
      */
     public cl_program loadProgram(Function<String, String> sourceReader, String kernelName) {
+        return loadProgram(sourceReader, kernelName, "");
+    }
+
+    /**
+     * Load an OpenCL program with extra compiler options (Stage 1 JIT
+     * specialization, e.g. {@code "-DFOG_MODE=0 -DHAS_EMITTERS=1"}).
+     *
+     * @param sourceReader  Function to read source files from filenames.
+     * @param kernelName    Kernel entrypoint filename.
+     * @param options       Extra options appended to {@code -cl-std=CL1.2 -Werror}.
+     * @return OpenCL program.
+     */
+    public cl_program loadProgram(Function<String, String> sourceReader, String kernelName, String options) {
         // Load kernel
         String kernel = sourceReader.apply(kernelName);
         cl_program kernelProgram = clCreateProgramWithSource(context, 1, new String[] { kernel },
@@ -85,7 +106,8 @@ public class ClContext {
         Arrays.setAll(includePrograms, i -> headerFiles.get(includeNames[i]));
 
         CL.setExceptionsEnabled(false);
-        int code = clCompileProgram(kernelProgram, 1, deviceArray, "-cl-std=CL1.2 -Werror",
+        String flags = "-cl-std=CL1.2 -Werror" + (options.isEmpty() ? "" : " " + options);
+        int code = clCompileProgram(kernelProgram, 1, deviceArray, flags,
                 includePrograms.length, includePrograms, includeNames, null, null);
         if (code != CL_SUCCESS) {
             String error;

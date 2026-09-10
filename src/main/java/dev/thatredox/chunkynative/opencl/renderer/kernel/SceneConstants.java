@@ -1,5 +1,6 @@
 package dev.thatredox.chunkynative.opencl.renderer.kernel;
 
+import dev.thatredox.chunkynative.opencl.renderer.OidnDenoiser;
 import dev.thatredox.chunkynative.opencl.ui.ChunkyClTab;
 import se.llbit.chunky.renderer.scene.Scene;
 
@@ -9,13 +10,15 @@ public class SceneConstants {
     private final int emitterSamplingStrategy;
     private final int preventNormalEmitterWithSampling;
     private final int profileRender;
+    private final int guidesEnabled;
 
-    private SceneConstants(int emittersEnabled, float emitterIntensity, int emitterSamplingStrategy, int preventNormalEmitterWithSampling, int profileRender) {
+    private SceneConstants(int emittersEnabled, float emitterIntensity, int emitterSamplingStrategy, int preventNormalEmitterWithSampling, int profileRender, int guidesEnabled) {
         this.emittersEnabled = emittersEnabled;
         this.emitterIntensity = emitterIntensity;
         this.emitterSamplingStrategy = emitterSamplingStrategy;
         this.preventNormalEmitterWithSampling = preventNormalEmitterWithSampling;
         this.profileRender = profileRender;
+        this.guidesEnabled = guidesEnabled;
     }
 
     public static SceneConstants fromScene(Scene scene) {
@@ -24,7 +27,8 @@ public class SceneConstants {
                 (float) scene.getEmitterIntensity(),
                 scene.getEmitterSamplingStrategy().ordinal(),
                 scene.isPreventNormalEmitterWithSampling() ? 1 : 0,
-                ChunkyClTab.profileRender ? 1 : 0
+                ChunkyClTab.profileRender ? 1 : 0,
+                OidnDenoiser.enabled ? 1 : 0
         );
     }
 
@@ -46,5 +50,9 @@ public class SceneConstants {
 
     public int getProfileRender() {
         return profileRender;
+    }
+
+    public int getGuidesEnabled() {
+        return guidesEnabled;
     }
 }
