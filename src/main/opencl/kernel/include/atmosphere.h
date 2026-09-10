@@ -11,9 +11,11 @@
 
 #define FOG_EXTINCTION_FACTOR 0.04f
 #define CLOUD_LAYER_HEIGHT 5.0f
+// CPU Fog.FOG_LIMIT: the distance used for the sky-fog y-span.
+#define FOG_LIMIT 30000.0f
 
 typedef struct {
-    int fogMode;              // 0 = NONE, 1 = UNIFORM, 2 = LAYERED (not implemented)
+    int fogMode;              // 0 = NONE, 1 = UNIFORM, 2 = LAYERED
     float3 fogColor;
     float uniformDensity;
     float skyFogDensity;
@@ -30,6 +32,10 @@ typedef struct {
     float animationTime;
     int waterMaterial;        // material palette index of water
     float waterOpacity;       // water surface alpha (CPU parity, default 0.42)
+    bool hasWater;            // water octree non-empty (host-computed) - gates the
+                              // always-run water octree march / medium lookup
+    int fogLayerCount;        // layered fog: number of logistic layers
+    __global const float* fogLayers; // layered fog: (yWithOrigin, breadthInv, density) x count
     bool profile;
     __global int* profileCounters;
 } Atmosphere;
@@ -53,6 +59,9 @@ Atmosphere Atmosphere_new(__global const float* settings, __global const int* cl
     a.animationTime = settings[19];
     a.waterMaterial = as_int(settings[20]);
     a.waterOpacity = settings[21];
+    a.hasWater = settings[22] > 0.5f;
+    a.fogLayerCount = (int)settings[23];
+    a.fogLayers = settings + 24;
     a.profile = false;
     a.profileCounters = (__global int*)0;
     return a;
@@ -77,10 +86,55 @@ Atmosphere Atmosphere_empty() {
     a.animationTime = 0.0f;
     a.waterMaterial = 0;
     a.waterOpacity = 1.0f;
+    // The preview kernel has no settings buffer; conservatively keep the water march
+    // enabled so water renders in the preview.
+    a.hasWater = true;
+    a.fogLayerCount = 0;
+    a.fogLayers = (__global const float*)0;
     a.profile = false;
     a.profileCounters = (__global int*)0;
     return a;
 }
+
+// CPU Fog.clampDy: prevents numerical errors / division by 0 when dy is close to 0.
+// Only layered fog (FOG_MODE == 2) uses these; guarding the definitions keeps the
+// -Werror build clean when the call sites above are specialized away.
+#if !defined(FOG_MODE) || FOG_MODE == 2
+static inline float Fog_clampDy(float dy) {
+    const float epsilon = 0.00001f;
+    if (dy > 0.0f) {
+        if (dy < epsilon) {
+            return epsilon;
+        }
+    } else if (dy > -epsilon) {
+        return -epsilon;
+    }
+    return dy;
+}
+
+// CPU Fog.addLayeredFog: logistic-CDF extinction over the y-span [y1, y2], with the
+// fully-sunlit inscatter approximation (scatterLight = 1), matching the uniform fog's
+// established simplification.
+static inline float3 Fog_applyLayered(Atmosphere self, float dy, float y1, float y2, float3 color) {
+    float total = 0.0f;
+    for (int i = 0; i < self.fogLayerCount; i++) {
+        float yWithOrigin = self.fogLayers[i * 3];
+        float breadthInv = self.fogLayers[i * 3 + 1];
+        float density = self.fogLayers[i * 3 + 2];
+        // Stage 2: native_exp — feeds 8-bit output via extinction/inscatter mix,
+        // so ~1e-3 error is invisible. Same below for the extinction.
+        float cdf1 = 1.0f / (1.0f + native_exp((yWithOrigin - y1) * breadthInv));
+        float cdf2 = 1.0f / (1.0f + native_exp((yWithOrigin - y2) * breadthInv));
+        total += density * (cdf1 - cdf2);
+    }
+    float extinction = native_exp(total / Fog_clampDy(dy));
+    float inscatter = 1.0f - extinction;
+    color.x = color.x * extinction + inscatter * self.fogColor.x;
+    color.y = color.y * extinction + inscatter * self.fogColor.y;
+    color.z = color.z * extinction + inscatter * self.fogColor.z;
+    return color;
+}
+#endif
 
 // Cloud bitset: 32x32 longs covering a periodic 256x256 world grid, one bit per block.
 int Cloud_get(__global const int* data, int x, int y) {

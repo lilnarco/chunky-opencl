@@ -25,11 +25,20 @@
 #define PROFILE_WAVE_NOISE_CALLS 14
 #define PROFILE_CLOUD_STEPS 15
 #define PROFILE_WATER_PLANE_TESTS 16
-#define PROFILE_COUNT 17
+#define PROFILE_OCTREE_DESCENT_STEPS 17
+#define PROFILE_COUNT 18
 
+// Counters are 32-bit; the host accumulates them after every frame, so the per-frame
+// delta can never approach the wrap limit (max ~25M rays/frame at 5K).
 static inline void Profile_inc(bool enabled, __global int* counters, int slot) {
     if (enabled) {
         atomic_inc(&counters[slot]);
+    }
+}
+
+static inline void Profile_add(bool enabled, __global int* counters, int slot, int amount) {
+    if (enabled) {
+        atomic_add(&counters[slot], amount);
     }
 }
 

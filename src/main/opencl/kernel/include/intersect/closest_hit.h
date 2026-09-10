@@ -3,16 +3,19 @@
 bool closestIntersect(Scene self, image2d_array_t atlas, Ray ray, IntersectionRecord* record, MaterialSample* sample, Material* mat) {
     bool hit = false;
 
-    // 0. 雲層優先測試 (與 CPU 的 nextIntersection 一致)
+    // Clouds first (matches the CPU nextIntersection order).
+#ifdef HAS_CLOUDS
     if (self.atmosphere.cloudsEnabled) {
         if (Cloud_intersect(self.atmosphere, ray, record, sample)) {
             hit = true;
         }
     }
+#endif
 
     // Water plane (CPU's waterPlaneIntersection): infinite horizontal plane below the
     // loaded chunks, entering from above with the water material and exiting from
     // below with air.
+#ifdef HAS_WATERPLANE
     if (self.atmosphere.waterPlaneEnabled && fabs(ray.direction.y) > EPS) {
         Profile_inc(self.profile, self.profileCounters, PROFILE_WATER_PLANE_TESTS);
         float t = (self.atmosphere.waterPlaneY - ray.origin.y) / ray.direction.y;
@@ -44,19 +47,23 @@ bool closestIntersect(Scene self, image2d_array_t atlas, Ray ray, IntersectionRe
             }
         }
     }
+#endif
     
-    // 1. 優先測試 Octree (通常是場景中最密集的物體)
+    // Solid octree first (usually the densest geometry in the scene).
     if (Octree_octreeIntersect(self.octree, atlas, self.blockPalette, self.materialPalette, self.biome, self.drawDepth, self.emittersEnabled, ray, record, sample)) {
         hit = true;
     }
     
-    // 2. 測試水面 Octree (只有在距離比目前撞到的更短時才有意義)
-    if (Octree_octreeIntersect(self.waterOctree, atlas, self.blockPalette, self.materialPalette, self.biome, self.drawDepth, self.emittersEnabled, ray, record, sample)) {
+    // Water octree (only matters when closer than the current hit).
+#ifdef HAS_WATER
+    if (self.atmosphere.hasWater &&
+            Octree_octreeIntersect(self.waterOctree, atlas, self.blockPalette, self.materialPalette, self.biome, self.drawDepth, self.emittersEnabled, ray, record, sample)) {
         hit = true;
     }
+#endif
 
-    // 3. 測試 BVH (同樣只在更短的情況下更新 hit)
-    // 注意：如果場景沒有實體，這部分會很快返回
+    // BVHs (likewise only update on a closer hit).
+    // Note: returns quickly when the scene has no entities.
     if (Bvh_intersect(self.worldBvh, atlas, self.materialPalette, self.biome, ray, record, sample)) {
         hit = true;
     }
@@ -77,18 +84,22 @@ void initialize_ray_medium(Scene scene, Ray* ray) {
     int3 blockPos = intFloorFloat3(ray->origin);
     int block = Octree_get(&scene.octree, blockPos.x, blockPos.y, blockPos.z);
     if (block == 0) {
-        int waterBlock = Octree_get(&scene.waterOctree, blockPos.x, blockPos.y, blockPos.z);
-        if (waterBlock != 0) {
-            int waterMaterial = BlockPalette_primaryMaterial(scene.blockPalette, waterBlock);
-            Material waterMat = Material_get(scene.materialPalette, waterMaterial);
-            if (!Material_isOpaque(waterMat)) {
-                ray->prevMaterial = 0;
-                ray->currentMaterial = waterMaterial;
-                ray->prevBlock = 0;
-                ray->currentBlock = waterBlock;
-                return;
+#ifdef HAS_WATER
+        if (scene.atmosphere.hasWater) {
+            int waterBlock = Octree_get(&scene.waterOctree, blockPos.x, blockPos.y, blockPos.z);
+            if (waterBlock != 0) {
+                int waterMaterial = BlockPalette_primaryMaterial(scene.blockPalette, waterBlock);
+                Material waterMat = Material_get(scene.materialPalette, waterMaterial);
+                if (!Material_isOpaque(waterMat)) {
+                    ray->prevMaterial = 0;
+                    ray->currentMaterial = waterMaterial;
+                    ray->prevBlock = 0;
+                    ray->currentBlock = waterBlock;
+                    return;
+                }
             }
         }
+#endif
         ray->prevMaterial = 0;
         ray->currentMaterial = 0;
         ray->prevBlock = 0;
