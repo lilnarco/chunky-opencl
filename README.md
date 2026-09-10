@@ -110,6 +110,38 @@ and extended here ([lilnarco/chunky-opencl](https://github.com/lilnarco/chunky-o
   not yet documented)
 - OIDN denoiser section (enable, binary path, Denoise now)
 - OpenCL device selector button
+- Kernel status line (`Kernel: compiled in Ns` vs `Kernel: cache, ready in Ns`)
+  plus a render-vs-compile lap timer
+
+### Work-group size tuning
+
+The driver picks the OpenCL work-group size unless overridden with
+`-DchunkyClWorkGroupSize=N` (JVM option, read once per session — restart
+Chunky between values). Smaller groups can hide traversal latency better on
+register-bound kernels. Measured 1080p×200 on RTX 3070 / 550.x (sun scene):
+64 → 26 s, 128 → 27 s, 256 / driver default → 28 s. The optimum is
+device- and scene-specific, so it stays a knob, not a default — tune once per
+GPU.
+
+### Kernel compile cache
+
+The render kernel is specialized to each scene's feature set and cached twice:
+linked binaries persist under `<chunky.home>/kernel-cache/`, and NVIDIA keeps
+its own compile cache (`~/.nv/ComputeCache`, default cap 256 MB shared with
+all CUDA apps). A first-seen feature set pays one compile (up to ~1 min on a
+big scene); later sessions reuse it.
+
+If session startup still shows long `Kernel:` times, the driver cache is likely
+full and evicting entries — raise it before launching:
+
+```
+export CUDA_CACHE_MAXSIZE=1073741824
+```
+
+Measured on RTX 3070 / 550.x: 21 s → 0 s backend time. Safe to delete
+`kernel-cache/` anytime (rebuilds as needed); entries self-invalidate after
+plugin or driver updates. To disable specialization entirely (single
+everything-on program, e.g. for A/B runs): `-DchunkyClJit=off`.
 
 ## Current limitations
 
