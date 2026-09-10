@@ -53,13 +53,23 @@ typedef struct {
 
 bool Material_isRefractive(Material self);
 
-bool Material_sample_mode(Material self, image2d_array_t atlas, float2 uv, bool allowTransparentHit, int3 worldPos, BiomeColors biome, MaterialSample* sample);
+bool Material_sample_mode(Material self, image2d_array_t atlas, float2 uv, bool allowTransparentHit, int3 worldPos, BiomeColors biome, MaterialSample* sample, bool occluder);
 
 bool Material_sample(Material self, image2d_array_t atlas, float2 uv, int3 worldPos, BiomeColors biome, MaterialSample* sample) {
-    return Material_sample_mode(self, atlas, uv, false, worldPos, biome, sample);
+    return Material_sample_mode(self, atlas, uv, false, worldPos, biome, sample, false);
 }
 
-bool Material_sample_mode(Material self, image2d_array_t atlas, float2 uv, bool allowTransparentHit, int3 worldPos, BiomeColors biome, MaterialSample* sample) {
+// Emittance fetch split out so shadow-ray termini can fetch it lazily: march
+// samples skip texture reads (see the occluder branch below), then the emitter
+// terminus — the only shadow-path consumer of emittance — fetches exactly what
+// the full sample would have read.
+float Material_sample_emittance(Material self, image2d_array_t atlas, float2 uv) {
+    if (self.flags & 0b00010)
+        return Atlas_read_uv(uv.x, uv.y, self.normal_emittance, self.textureSize, atlas).w;
+    return as_float(self.normal_emittance);
+}
+
+bool Material_sample_mode(Material self, image2d_array_t atlas, float2 uv, bool allowTransparentHit, int3 worldPos, BiomeColors biome, MaterialSample* sample, bool occluder) {
     // Color
     float4 color;
     if (self.flags & 0b00001)
@@ -111,8 +121,19 @@ bool Material_sample_mode(Material self, image2d_array_t atlas, float2 uv, bool 
     }
 
     // (Normal) emittance — packed as full float bits to preserve intensities > 1.
+    // Shadow (occluder) march samples skip texture reads: specular/metalness/
+    // roughness are dead on every shadow path, and emittance is re-fetched
+    // exactly at the emitter terminus (its only shadow consumer). The color
+    // path above stays bit-identical (attenuation, tint and transparent-texel
+    // reject all depend on it).
+    if (occluder) {
+        sample->emittance = 0.0f;
+        sample->specular = 0.0f;
+        sample->metalness = 0.0f;
+        sample->roughness = 0.0f;
+    } else {
     if (self.flags & 0b00010)
-        sample->emittance = Atlas_read_uv(uv.x, uv.y, self.normal_emittance, self.textureSize, atlas).w;
+        sample->emittance = Material_sample_emittance(self, atlas, uv);
     else
         sample->emittance = as_float(self.normal_emittance);
 
@@ -127,7 +148,8 @@ bool Material_sample_mode(Material self, image2d_array_t atlas, float2 uv, bool 
         sample->metalness = ((self.specular_metalness_roughness >> 8) & 0xFF) / 255.0;
         sample->roughness = ((self.specular_metalness_roughness >> 16) & 0xFF) / 255.0;
     }
-    
+    }
+
     return true;
 }
 
