@@ -10,6 +10,7 @@ import org.jocl.*;
 import se.llbit.chunky.renderer.DefaultRenderManager;
 import se.llbit.chunky.renderer.Renderer;
 import se.llbit.chunky.renderer.ResetReason;
+import se.llbit.chunky.renderer.projection.ProjectionMode;
 import se.llbit.chunky.renderer.scene.Scene;
 import se.llbit.util.TaskTracker;
 import se.llbit.util.Mutable;
@@ -21,6 +22,21 @@ import static org.jocl.CL.*;
 
 public class OpenClPreviewRenderer implements Renderer {
     private BooleanSupplier postRender = () -> true;
+
+    // Persistent per-frame resources (this instance lives for the session, and
+    // render() runs serially on the preview thread): kernel and pixel buffer are
+    // rebuilt only on canvas/program/context change. The CAMERA is persistent
+    // only for pre-generated (panoramic-family) projections, whose buffers are
+    // full-res and whose generate() refreshes rays from the live camera every
+    // frame; pinhole/parallel cameras snapshot position into ~10 floats at
+    // construction, so they are recreated per frame (exactly like before) —
+    // persisting them would freeze the preview on camera moves.
+    private cl_kernel previewKernel = null;
+    private String previewDefines = null;
+    private ClCamera previewCamera = null;
+    private ClMemory previewBuffer = null;
+    private int previewPixels = -1;
+    private ContextManager previewContext = null;
 
     @Override
     public String getId() {
@@ -54,32 +70,60 @@ public class OpenClPreviewRenderer implements Renderer {
         // Ensure the scene is loaded
         sceneLoader.ensureLoad(manager.bufferedScene);
 
-        // Load the kernel: same scene-specialized program as the main renderer,
-        // so a session builds one program instead of two.
-        cl_kernel kernel = clCreateKernel(
-                context.renderer.kernelFor(KernelDefines.forScene(scene, sceneLoader)), "preview", null);
+        // Rebuild persistent kernel+buffer only on canvas/program/context change.
+        String defines = KernelDefines.forScene(scene, sceneLoader);
+        if (previewKernel == null || previewContext != context
+                || !defines.equals(previewDefines) || imageData.length != previewPixels) {
+            releasePreview();
+            previewKernel = clCreateKernel(context.renderer.kernelFor(defines), "preview", null);
+            previewBuffer = new ClMemory(clCreateBuffer(context.context.context, CL_MEM_WRITE_ONLY,
+                    (long) Sizeof.cl_int * imageData.length, null, null));
+            previewDefines = defines;
+            previewPixels = imageData.length;
+            previewContext = context;
+        }
+        cl_kernel kernel = previewKernel;
+        ClMemory buffer = previewBuffer;
 
-        ClCamera camera = new ClCamera(scene, context.context);
-        ClMemory buffer = new ClMemory(clCreateBuffer(context.context.context, CL_MEM_WRITE_ONLY,
-                (long) Sizeof.cl_int * imageData.length, null, null));
+        // Camera: panoramic pre-generated buffers are full-res, so the camera
+        // persists (generate() refreshes rays from the live camera every frame;
+        // canvas resizes drop it via releasePreview above). Pinhole/parallel
+        // snapshots position into ~10 floats at construction, so a fresh one is
+        // built per frame — exactly like before, and moves always apply.
+        // A projection-mode switch drops the persisted camera either way.
+        ProjectionMode projectionMode = scene.camera().getProjectionMode();
+        boolean wantGenerated = projectionMode != ProjectionMode.PINHOLE
+                && projectionMode != ProjectionMode.PARALLEL;
+        ClCamera frameCamera = previewCamera;
+        if (frameCamera == null || frameCamera.needGenerate != wantGenerated) {
+            frameCamera = new ClCamera(scene, context.context);
+            if (wantGenerated && frameCamera.needGenerate) {
+                if (previewCamera != null) {
+                    previewCamera.close();
+                }
+                previewCamera = frameCamera;
+            }
+        }
+        boolean ownCamera = frameCamera != previewCamera;
+
         ClIntBuffer clCanvasConfig = new ClIntBuffer(new int[] {
                 scene.canvasConfig.getWidth(), scene.canvasConfig.getHeight(),
                 scene.canvasConfig.getCropWidth(), scene.canvasConfig.getCropHeight(),
                 scene.canvasConfig.getCropX(), scene.canvasConfig.getCropY()
         }, context.context);
 
-        try (ClCamera ignored1 = camera;
-             ClMemory ignored2 = buffer;
-             ClIntBuffer ignored3 = clCanvasConfig) {
+        try (ClIntBuffer ignored = clCanvasConfig;
+             ClCamera owned = ownCamera ? frameCamera : null) {
 
             // Generate the camera rays
-            camera.generate(null, false);
+            frameCamera.generate(null, false);
 
             renderEvent[0] = new cl_event();
 
+            try {
             int argIndex = 0;
-            clSetKernelArg(kernel, argIndex++, Sizeof.cl_mem, Pointer.to(camera.projectorType.get()));
-            clSetKernelArg(kernel, argIndex++, Sizeof.cl_mem, Pointer.to(camera.cameraSettings.get()));
+            clSetKernelArg(kernel, argIndex++, Sizeof.cl_mem, Pointer.to(frameCamera.projectorType.get()));
+            clSetKernelArg(kernel, argIndex++, Sizeof.cl_mem, Pointer.to(frameCamera.cameraSettings.get()));
 
             clSetKernelArg(kernel, argIndex++, Sizeof.cl_mem, Pointer.to(sceneLoader.getOctreeDepth().get()));
             clSetKernelArg(kernel, argIndex++, Sizeof.cl_mem, Pointer.to(sceneLoader.getOctreeData().get()));
@@ -116,13 +160,32 @@ public class OpenClPreviewRenderer implements Renderer {
             clEnqueueReadBuffer(context.context.queue, buffer.get(), CL_TRUE, 0,
                     (long) Sizeof.cl_int * imageData.length, Pointer.to(imageData),
                     1, renderEvent, null);
+            } finally {
+                clReleaseEvent(renderEvent[0]);
+            }
 
             manager.redrawScreen();
             postRender.getAsBoolean();
         }
+    }
 
-        clReleaseKernel(kernel);
-        clReleaseEvent(renderEvent[0]);
+    /** Release persistent frame resources (rebuild on next render). */
+    private void releasePreview() {
+        if (previewKernel != null) {
+            clReleaseKernel(previewKernel);
+            previewKernel = null;
+        }
+        if (previewCamera != null) {
+            previewCamera.close();
+            previewCamera = null;
+        }
+        if (previewBuffer != null) {
+            previewBuffer.close();
+            previewBuffer = null;
+        }
+        previewDefines = null;
+        previewPixels = -1;
+        previewContext = null;
     }
 
     @Override
