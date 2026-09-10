@@ -5,7 +5,7 @@ bool closestIntersect(Scene self, image2d_array_t atlas, Ray ray, IntersectionRe
 
     // Clouds first (matches the CPU nextIntersection order).
 #ifdef HAS_CLOUDS
-    if (self.atmosphere.cloudsEnabled) {
+    if (self.atmosphere.cloudsEnabled && Cloud_canHit(self.atmosphere, ray)) {
         if (Cloud_intersect(self.atmosphere, ray, record, sample)) {
             hit = true;
         }
