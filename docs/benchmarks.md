@@ -177,3 +177,11 @@ emitter scenes don't disagree. No code changes — tab slider only.
   `ComputeCache` (default 256 MB cap) evicts under pressure — measured 21 s
   backend with a full cache vs 0 s after `CUDA_CACHE_MAXSIZE=1073741824`
   (RTX 3070 / 550.x). See README.
+- Cloud gate (2026-09-10): night 19 -> 18 s, day 28 -> 27 s, day-ON 32 ->
+  31 s; M2 exact to ghost-floor; day PNG statistically clean (uniform
+  sub-8-LSB scatter, zero sky concentration). Small and real, as predicted —
+  emitter-shadow segments skipping call overhead.
+- M5 methodology correction: same-jar pairs may demand exact-0 (day) or floor
+  (night ghost); CROSS-JAR pairs are inherently statistical (SASS/FMA ulp
+  noise + rare edge chaos) — validate those via M2 exact + |Dmean| + rms +
+  structure, never pixel equality.
