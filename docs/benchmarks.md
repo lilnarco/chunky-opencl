@@ -165,6 +165,13 @@ emitter scenes don't disagree. No code changes — tab slider only.
   The remaining march tax is the per-step root re-walk (~7 loads × 45 steps);
   fixing that needs persistent restart/rope state — a project, not a slice.
   Recorded so nobody re-proposes it.
+- Shadow lightweight sampling (2026-09-09): walls FLAT both scenes (19/28 s),
+  M2 exact twice, day PNG digit-identical to pre-cut (180935/87568/77922).
+  The eliminated SMR/emittance reads hide behind traversal-divergence latency;
+  shadow cost is pure march. Kept as zero-cost insurance for
+  translucent/entity-heavy scenes (hamhut is fast-path-saturated). Lesson:
+  on latency-bound kernels, removing ALU/reads that overlap stalls measures
+  zero — profile the critical path, not the instruction count.
 - JIT kill-switch: `-DchunkyClJit=off` forces the single everything-on program
   (A/B "was JIT worth it", paranoia runs). Driver-cache note: NVIDIA's
   `ComputeCache` (default 256 MB cap) evicts under pressure — measured 21 s
