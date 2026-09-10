@@ -32,20 +32,33 @@ public class GpuSceneResources implements AutoCloseable {
     private final ClMemory profileCounters;
     private final boolean guidesEnabled;
 
+    /** Device-side zero fill (in-order queue: complete before first dispatch). */
+    private static void fillZero(ClContext context, ClMemory mem, int floats) {
+        clEnqueueFillBuffer(context.queue, mem.get(), Pointer.to(new float[] {0.0f}),
+                Sizeof.cl_int, 0, (long) Sizeof.cl_float * floats, 0, null, null);
+    }
+
     public GpuSceneResources(ClContext context, Scene scene, float[] passBuffer) {
         this.context = context;
 
-        this.buffer = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                (long) Sizeof.cl_float * passBuffer.length, Pointer.to(passBuffer), null));
+        // Output-only buffers: device-side zero fill instead of a host zero-page
+        // upload (no 25-200 MB of zeros over PCIe per render). Fill, not
+        // uninitialized VRAM: the running averages multiply the initial content
+        // by spp=0 on first write, but only exact zeros defeat NaN garbage.
+        this.buffer = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_WRITE,
+                (long) Sizeof.cl_float * passBuffer.length, null, null));
+        fillZero(context, this.buffer, passBuffer.length);
         // Auxiliary render passes (albedo/normal), used by the OIDN denoiser. When the
         // denoiser is off these are 1-float dummies (the kernel never writes them), which
         // saves 2x full-res VRAM (600 MB at 5K).
         int guideLength = OidnDenoiser.enabled ? passBuffer.length : 1;
         this.guidesEnabled = OidnDenoiser.enabled;
-        this.albedoBuffer = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                (long) Sizeof.cl_float * guideLength, Pointer.to(new float[guideLength]), null));
-        this.normalBuffer = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-                (long) Sizeof.cl_float * guideLength, Pointer.to(new float[guideLength]), null));
+        this.albedoBuffer = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_WRITE,
+                (long) Sizeof.cl_float * guideLength, null, null));
+        fillZero(context, this.albedoBuffer, guideLength);
+        this.normalBuffer = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_WRITE,
+                (long) Sizeof.cl_float * guideLength, null, null));
+        fillZero(context, this.normalBuffer, guideLength);
         this.randomSeed = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_ONLY, Sizeof.cl_int, null, null));
         this.bufferSpp = new ClMemory(clCreateBuffer(context.context, CL_MEM_READ_ONLY, Sizeof.cl_int, null, null));
 

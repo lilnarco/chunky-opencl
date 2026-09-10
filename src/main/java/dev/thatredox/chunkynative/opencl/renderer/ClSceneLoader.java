@@ -63,6 +63,14 @@ public class ClSceneLoader extends AbstractSceneLoader {
     protected ClMemory biomeFoliage = null;
     protected ClMemory biomeDryFoliage = null;
     protected ClMemory biomeWater = null;
+    // Biome cache key: biome colors depend only on which chunks exist, the scene
+    // origin, and the toggle (not on block data), mirroring the emitter grid's
+    // "don't rebuild every frame" pragmatism one level stricter.
+    private Collection<ChunkPosition> prevBiomeChunks = null;
+    private int prevBiomeChunkCount = -1;
+    private boolean prevBiomeUseBiome = false;
+    private int prevBiomeOriginX = Integer.MIN_VALUE;
+    private int prevBiomeOriginZ = Integer.MIN_VALUE;
     private final ClContext context;
 
     public ClSceneLoader(ClContext context) {
@@ -80,6 +88,10 @@ public class ClSceneLoader extends AbstractSceneLoader {
     @Override
     public boolean load(int modCount, ResetReason resetReason, Scene scene) {
         boolean loadSuccess = super.load(modCount, resetReason, scene);
+        // NOTE: super.load deliberately does NOT store modCount on the heavy path;
+        // this comparison is the subclass dirty signal for sky/emitter/biome. Do not
+        // "fix" by storing it in AbstractSceneLoader — the prolog below would stop
+        // running and nothing would ever upload.
         if (this.modCount != modCount) {
             SkyState newSky = new SkyState(scene.sky(), scene.sun());
             if (!newSky.equals(skyState)) {
@@ -170,6 +182,19 @@ public class ClSceneLoader extends AbstractSceneLoader {
     }
 
     private void loadBiomeColors(Scene scene) {
+        Collection<ChunkPosition> chunksNow = scene.getChunks();
+        boolean useBiomeNow = scene.biomeColorsEnabled();
+        Vector3i originNow = scene.getOrigin();
+        int countNow = chunksNow == null ? -1 : chunksNow.size();
+        if (chunksNow == prevBiomeChunks && countNow == prevBiomeChunkCount && useBiomeNow == prevBiomeUseBiome
+                && originNow.x == prevBiomeOriginX && originNow.z == prevBiomeOriginZ && biomeMeta != null) {
+            return; // chunk set, origin and toggle unchanged since last build
+        }
+        prevBiomeChunks = chunksNow;
+        prevBiomeChunkCount = countNow;
+        prevBiomeUseBiome = useBiomeNow;
+        prevBiomeOriginX = originNow.x;
+        prevBiomeOriginZ = originNow.z;
         if (biomeMeta != null) biomeMeta.close();
         if (biomeGrid != null) biomeGrid.close();
         if (biomeGrass != null) biomeGrass.close();
