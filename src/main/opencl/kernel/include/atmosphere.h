@@ -162,6 +162,38 @@ void Cloud_sample(MaterialSample* sample) {
     sample->roughness = 0.0f;
 }
 
+// Cheap geometric reject replicating Cloud_intersect's two cheap-false cases
+// (outside the slab pointing away, or near-horizontal): lets the call site skip
+// the call + DDA setup for guaranteed misses. Must mirror the in-function math
+// exactly — world Y (origin.y + atmosphere.origin.y, NOT the water-plane
+// convention), CLOUD_LAYER_HEIGHT (never a literal), EPS band, and the exact
+// tEntry sign branches. Only the two provable misses reject; entry-probe and
+// inside-slab rays always pass through to Cloud_intersect.
+// Guarded on HAS_CLOUDS like its sole call site, so -Werror stays clean when
+// clouds are stripped.
+#ifdef HAS_CLOUDS
+static inline bool Cloud_canHit(Atmosphere self, Ray ray) {
+    float oy = ray.origin.y + (float)self.origin.y;
+    float offsetY = self.cloudOffset.y;
+    float cloudTop = offsetY + CLOUD_LAYER_HEIGHT;
+    if (oy < offsetY || oy > cloudTop) {
+        if (fabs(ray.direction.y) < EPS) {
+            return false;
+        }
+        float tEntry;
+        if (ray.direction.y > 0.0f) {
+            tEntry = (offsetY - oy) / ray.direction.y;
+        } else {
+            tEntry = (cloudTop - oy) / ray.direction.y;
+        }
+        if (tEntry < 0.0f) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
 // Port of Sky.cloudIntersection: 2D DDA through the periodic cloud grid between
 // [cloudOffset.y, cloudOffset.y + 5] in world coordinates. Handles both entering
 // (target = 1) and exiting (target = 0) the cloud layer like the CPU renderer.
