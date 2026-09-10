@@ -57,6 +57,13 @@ public class ClSceneLoader extends AbstractSceneLoader {
     protected WeakReference<Grid> prevEmitterGrid = new WeakReference<>(null, null);
     protected int[] prevEmitterGridBlockMapping = null;
     private int waterMaterialId = 0;
+    // Sky-bake debounce: sun/sky slider scrubbing fires a reset per tick, and a
+    // full HDR rebake (up to 512 MB) per tick stalls the UI. Coalesce rebuilds to
+    // one per window; any reset past the window refreshes, so finals (which always
+    // follow a pause in scrubbing) still bake the exact state. Worst case a render
+    // started mid-scrub uses a <window-old sky — arcseconds of sun motion.
+    private long lastSkyBuildMs = 0;
+    private static final long SKY_REBUILD_DEBOUNCE_MS = 500;
     protected ClIntBuffer biomeMeta = null;
     protected ClIntBuffer biomeGrid = null;
     protected ClMemory biomeGrass = null;
@@ -95,10 +102,14 @@ public class ClSceneLoader extends AbstractSceneLoader {
         if (this.modCount != modCount) {
             SkyState newSky = new SkyState(scene.sky(), scene.sun());
             if (!newSky.equals(skyState)) {
-                if (clSky != null) clSky.close();
-                clSky = new ClSky(scene, context);
-                skyState = newSky;
-                packedSun = new PackedSun(scene.sun(), getTexturePalette());
+                long now = System.currentTimeMillis();
+                if (now - lastSkyBuildMs >= SKY_REBUILD_DEBOUNCE_MS) {
+                    if (clSky != null) clSky.close();
+                    clSky = new ClSky(scene, context);
+                    skyState = newSky;
+                    packedSun = new PackedSun(scene.sun(), getTexturePalette());
+                    lastSkyBuildMs = now;
+                }
             }
             loadEmitterGrid(scene);
             loadBiomeColors(scene);
