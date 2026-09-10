@@ -299,7 +299,7 @@ bool WaterModel_sampleTriangle(
     float w = 1.0f - u - v;
     float2 texCoord = ta * w + tb * u + tc * v;
     MaterialSample tempSample;
-    if (!Material_sample_mode(material, atlas, texCoord, false, blockPos, biome, &tempSample)) {
+    if (!Material_sample_mode(material, atlas, texCoord, false, blockPos, biome, &tempSample, (ray.flags & RAY_OCCLUDER) != 0)) {
         return false;
     }
 
@@ -333,7 +333,7 @@ bool WaterModel_intersect(
     if (((data >> 16) & 1) != 0) {
         IntersectionRecord tempRecord = *record;
         if (AABB_full_intersect_map_2(AABB_new(0, 1, 0, 1, 0, 1), ray, &tempRecord) &&
-                Material_sample_mode(material, atlas, tempRecord.texCoord, false, blockPos, biome, sample)) {
+                Material_sample_mode(material, atlas, tempRecord.texCoord, false, blockPos, biome, sample, (ray.flags & RAY_OCCLUDER) != 0)) {
             tempRecord.material = materialId;
             *record = tempRecord;
             return true;
@@ -422,7 +422,7 @@ bool BlockPalette_intersectNormalizedBlock(BlockPalette self, image2d_array_t at
                     *record = tempRecord;
                     return true;
                 }
-                hit = Material_sample_mode(material, atlas, tempRecord.texCoord, true, blockPosition, biome, sample);
+                hit = Material_sample_mode(material, atlas, tempRecord.texCoord, true, blockPosition, biome, sample, (ray.flags & RAY_OCCLUDER) != 0);
                 if (hit) {
                     if (insideBlock && Material_isRefractive(material) && !Material_isOpaque(material) &&
                             dot(tempRecord.normal, tempRay.direction) > 0.0f &&
@@ -484,7 +484,7 @@ bool BlockPalette_intersectNormalizedBlock(BlockPalette self, image2d_array_t at
                 }
 
                 Material material = Material_get(materialPalette, tempRecord.material);
-                hit = Material_sample_mode(material, atlas, tempRecord.texCoord, true, blockPosition, biome, sample);
+                hit = Material_sample_mode(material, atlas, tempRecord.texCoord, true, blockPosition, biome, sample, (ray.flags & RAY_OCCLUDER) != 0);
                 if (hit) {
                     tempRecord.block = block;
                     *record = tempRecord;

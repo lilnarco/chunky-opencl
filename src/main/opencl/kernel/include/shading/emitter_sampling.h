@@ -56,6 +56,13 @@ float3 sampleEmitterFace(
 
         traveled += record.distance;
         if (fabs(traveled - distance) <= (2.0f * OFFSET)) {
+            // March samples skip texture reads on occluder paths; the terminus is
+            // the only shadow consumer of emittance, so fetch exactly it here.
+            // Clouds and air carry no emitter light — their march sample (zero)
+            // is already exact, and their palette slots must not be re-read.
+            if (record.material != CLOUD_MATERIAL && record.material != 0) {
+                sample.emittance = Material_sample_emittance(material, textureAtlas, record.texCoord);
+            }
             if (sample.emittance <= EPS) {
                 return (float3)(0.0f);
             }

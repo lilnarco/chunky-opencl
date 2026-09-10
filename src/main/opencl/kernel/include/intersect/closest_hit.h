@@ -29,7 +29,7 @@ bool closestIntersect(Scene self, image2d_array_t atlas, Ray ray, IntersectionRe
                 planeRecord.normal = (float3)(0.0f, 1.0f, 0.0f);
                 planeRecord.material = self.atmosphere.waterMaterial;
                 Material waterMat = Material_get(self.materialPalette, planeRecord.material);
-                if (Material_sample_mode(waterMat, atlas, uv, false, intFloorFloat3(wp), self.biome, sample)) {
+                if (Material_sample_mode(waterMat, atlas, uv, false, intFloorFloat3(wp), self.biome, sample, (ray.flags & RAY_OCCLUDER) != 0)) {
                     sample->color.w = self.atmosphere.waterOpacity;
                     *record = planeRecord;
                     hit = true;
@@ -39,7 +39,7 @@ bool closestIntersect(Scene self, image2d_array_t atlas, Ray ray, IntersectionRe
                 planeRecord.normal = (float3)(0.0f, -1.0f, 0.0f);
                 planeRecord.material = 0;
                 Material waterMat = Material_get(self.materialPalette, self.atmosphere.waterMaterial);
-                if (Material_sample_mode(waterMat, atlas, uv, false, intFloorFloat3(wp), self.biome, sample)) {
+                if (Material_sample_mode(waterMat, atlas, uv, false, intFloorFloat3(wp), self.biome, sample, (ray.flags & RAY_OCCLUDER) != 0)) {
                     sample->color.w = self.atmosphere.waterOpacity;
                     *record = planeRecord;
                     hit = true;

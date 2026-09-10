@@ -293,7 +293,7 @@ bool TexturedAABB_intersect(TexturedAABB self, image2d_array_t atlas, MaterialPa
         *record = tempRecord;
         return true;
     }
-    if (Material_sample_mode(material, atlas, tempRecord.texCoord, false, blockPos, biome, sample)) {
+    if (Material_sample_mode(material, atlas, tempRecord.texCoord, false, blockPos, biome, sample, (ray.flags & RAY_OCCLUDER) != 0)) {
         *record = tempRecord;
         return true;
     } else {
@@ -362,7 +362,7 @@ bool Quad_intersect(Quad self, image2d_array_t atlas, MaterialPalette materialPa
                     record->material = self.material;
                     return true;
                 }
-                if (Material_sample_mode(material, atlas, texCoord, hitTransparent, blockPos, biome, sample)) {
+                if (Material_sample_mode(material, atlas, texCoord, hitTransparent, blockPos, biome, sample, (ray.flags & RAY_OCCLUDER) != 0)) {
                     record->texCoord = texCoord;
                     record->normal = n;
                     record->distance = t;
@@ -461,7 +461,7 @@ bool Triangle_intersect(Triangle self, image2d_array_t atlas, MaterialPalette ma
 
         Material material = Material_get(materialPalette, self.material);
         int3 worldPos = intFloorFloat3(ray.origin + ray.direction * t);
-        if (Material_sample_mode(material, atlas, texCoord, false, worldPos, biome, sample)) {
+        if (Material_sample_mode(material, atlas, texCoord, false, worldPos, biome, sample, (ray.flags & RAY_OCCLUDER) != 0)) {
             record->texCoord = texCoord;
             record->normal = self.n;
             record->material = self.material;
