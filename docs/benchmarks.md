@@ -185,3 +185,16 @@ emitter scenes don't disagree. No code changes — tab slider only.
   (night ghost); CROSS-JAR pairs are inherently statistical (SASS/FMA ulp
   noise + rare edge chaos) — validate those via M2 exact + |Dmean| + rms +
   structure, never pixel equality.
+- Host batch 1: stash guides only while the buffer converges (bufferSppReal
+  mirrors GUIDE_SPP_CAP) or when no stash exists; output-only GPU buffers
+  zero via device fill (defeats NaN-garbage poisoning of the spp=0 first
+  average); biome buffers gain an emitter-grid-style identity guard.
+  modCount non-commit documented as load-bearing (super's non-store is the
+  subclass dirty signal). Walls unchanged by design (load/reset path);
+  M2 exact.
+- Host batch 2: preview persists kernel + pixel buffer (+ panoramic camera
+  only — pinhole snapshots position at construction, persisting it froze the
+  view; caught on self-review) with rebuild-on-change and finally-released
+  events; sky HDR rebake debounced to 1/500 ms (finals always follow a
+  pause). Deferred with reason: overlapped merge readback (~0.5% steady
+  state; saveEvent path is Chunky snapshot semantics).
