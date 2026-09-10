@@ -192,8 +192,14 @@ public class OpenClPathTracingRenderer implements Renderer {
                                 0, null, null);
 
                         // Stash the current albedo/normal guides so "Denoise now" can work
-                        // even when the GPU render is not active.
-                        if (gpu.hasGuides() && (OidnDenoiser.enabled || OidnDenoiser.lastAlbedo == null)) {
+                        // even when the GPU render is not active. Guides freeze once
+                        // the buffer converges (mirrors GUIDE_SPP_CAP: samples < 32
+                        // contribute), so re-stashing frozen guides is pure waste —
+                        // stash while the buffer is still converging, or when no
+                        // stash exists yet. (bufferSppReal, not the logical total:
+                        // a resumed render re-converges its fresh GPU buffer.)
+                        if (gpu.hasGuides() && ((OidnDenoiser.enabled && bufferSppReal < 33)
+                                || OidnDenoiser.lastAlbedo == null)) {
                             stashGuides(context.context.queue, gpu, passBuffer.length);
                         }
 
@@ -253,8 +259,9 @@ public class OpenClPathTracingRenderer implements Renderer {
                         logicalSpp += passSpp;
                         bufferSppReal = 0;
                     }
-                    // Fresh guides straight from the GPU.
-                    if (gpu.hasGuides()) {
+                    // Fresh guides straight from the GPU (skipped when a stash from
+                    // the frozen phase already exists — see the merge stash above).
+                    if (gpu.hasGuides() && OidnDenoiser.lastAlbedo == null) {
                         stashGuides(context.context.queue, gpu, passBuffer.length);
                     }
                     denoiseFrame(manager.context.getSceneDirectory(), scene, sampleBuffer,
